@@ -1,6 +1,7 @@
 package com.example.ui.tools
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -20,10 +21,14 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.ai.AiCoachManager
 import com.example.data.FinancialCalculator
 import com.example.model.*
 import com.example.ui.components.ConfirmActionDialog
+import com.example.ui.components.DataQualityBadgeRow
 import com.example.ui.components.PersistentDisclaimerBanner
+import com.example.ui.components.ReportErrorDialog
+import com.example.ui.traceability.WhyActionDialog
 import com.example.ui.theme.*
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -43,6 +48,13 @@ fun WeeklyCheckInAndLessonsScreen(
     onLogNoSpendDay: () -> Boolean,
     onCompleteWeeklyCheckIn: () -> Unit,
     onSaveMonthlySnapshot: (MonthlyHealthSnapshot) -> Unit = {},
+    coachManager: AiCoachManager = remember { AiCoachManager() },
+    completedActionKeys: Set<String> = emptySet(),
+    onMarkActionDone: (MonthlyActionItem) -> Unit = {},
+    onFlagError: (itemType: String, itemId: String, itemTitle: String, note: String, snapshotSummary: String, ruleId: String?) -> Unit = { _, _, _, _, _, _ -> },
+    onOpenScoreDetail: () -> Unit = {},
+    onOpenHowDecides: () -> Unit = {},
+    onNavigateActionDestination: (ActionTargetDestination) -> Unit = {},
     onBack: () -> Unit,
     initialTab: Int = 0,
     modifier: Modifier = Modifier
@@ -53,6 +65,9 @@ fun WeeklyCheckInAndLessonsScreen(
     var showConfirmNoSpend by remember { mutableStateOf(false) }
     var showConfirmCheckIn by remember { mutableStateOf(false) }
     var showConfirmMonthlySnapshot by remember { mutableStateOf(false) }
+    var whyDialogAction by remember { mutableStateOf<MonthlyActionItem?>(null) }
+    var pendingMarkDoneAction by remember { mutableStateOf<MonthlyActionItem?>(null) }
+    var flagDialogTarget by remember { mutableStateOf<Triple<String, String, Pair<String, String?>>?>(null) }
     var snackbarMessage by remember { mutableStateOf<String?>(null) }
 
     val todayStr = remember { SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date()) }
@@ -135,7 +150,25 @@ fun WeeklyCheckInAndLessonsScreen(
                 MonthlyReportTabContent(
                     report = monthlyReport,
                     hasSavedCurrentMonth = hasSavedCurrentMonth,
-                    onRequestSaveSnapshot = { showConfirmMonthlySnapshot = true }
+                    completedActionKeys = completedActionKeys,
+                    onOpenScoreDetail = onOpenScoreDetail,
+                    onRequestSaveSnapshot = { showConfirmMonthlySnapshot = true },
+                    onWhyAction = { action -> whyDialogAction = action },
+                    onRequestMarkDone = { action -> pendingMarkDoneAction = action },
+                    onFlagScore = {
+                        flagDialogTarget = Triple(
+                            "MONEY_HEALTH_SCORE",
+                            "monthly_report_score",
+                            "Money Health Score (${monthlyReport.currentScore}/100)" to monthlyReport.tracedScore?.triggeredRuleIds?.firstOrNull()
+                        )
+                    },
+                    onFlagAction = { action ->
+                        flagDialogTarget = Triple(
+                            "TOP_ACTION",
+                            action.actionKey,
+                            "Action #${action.priority}: ${action.title}" to action.ruleId.ifBlank { null }
+                        )
+                    }
                 )
             } else {
                 LazyColumn(
@@ -416,13 +449,82 @@ fun WeeklyCheckInAndLessonsScreen(
             onDismiss = { showConfirmMonthlySnapshot = false }
         )
     }
+
+    whyDialogAction?.let { action ->
+        WhyActionDialog(
+            action = action,
+            profile = profile,
+            dataQualityNotes = monthlyReport.dataQualityNotes,
+            coachManager = coachManager,
+            onNavigateDestination = onNavigateActionDestination,
+            onOpenHowDecides = {
+                whyDialogAction = null
+                onOpenHowDecides()
+            },
+            onFlagError = {
+                whyDialogAction = null
+                flagDialogTarget = Triple(
+                    "TOP_ACTION",
+                    action.actionKey,
+                    "Action #${action.priority}: ${action.title}" to action.ruleId.ifBlank { null }
+                )
+            },
+            onDismiss = { whyDialogAction = null }
+        )
+    }
+
+    pendingMarkDoneAction?.let { action ->
+        val numbersText = action.traceability?.triggeringNumbers
+            ?.joinToString("; ") { "${it.label}: ${it.valueFormatted}" }
+            ?: action.howMuch
+        ConfirmActionDialog(
+            title = "Mark Action Done?",
+            summaryLines = listOf(
+                "Mark \"${action.title}\" as completed.",
+                "Target: ${action.howMuch} (${action.byWhen})",
+                "Records this action in your local Activity History."
+            ),
+            confirmLabel = "Mark Done",
+            whyText = action.traceability?.ruleDescription ?: action.what,
+            backingNumbers = numbersText,
+            ruleId = action.ruleId.ifBlank { null },
+            activityCategory = "Action Completed",
+            onConfirm = {
+                onMarkActionDone(action)
+                snackbarMessage = "Marked \"${action.title}\" done & logged to Activity History."
+                pendingMarkDoneAction = null
+            },
+            onDismiss = { pendingMarkDoneAction = null }
+        )
+    }
+
+    flagDialogTarget?.let { (itemType, itemId, titleAndRule) ->
+        val (title, ruleId) = titleAndRule
+        ReportErrorDialog(
+            itemTitle = title,
+            contextSummary = "Score ${monthlyReport.currentScore}/100 (${monthlyReport.currentMonthKey})",
+            ruleId = ruleId,
+            onSubmit = { note ->
+                onFlagError(itemType, itemId, title, note, "Monthly Report ${monthlyReport.currentMonthKey}", ruleId)
+                flagDialogTarget = null
+                snackbarMessage = "Flag saved locally in Activity History."
+            },
+            onDismiss = { flagDialogTarget = null }
+        )
+    }
 }
 
 @Composable
 private fun MonthlyReportTabContent(
     report: MonthlyImprovementReport,
     hasSavedCurrentMonth: Boolean,
-    onRequestSaveSnapshot: () -> Unit
+    completedActionKeys: Set<String>,
+    onOpenScoreDetail: () -> Unit,
+    onRequestSaveSnapshot: () -> Unit,
+    onWhyAction: (MonthlyActionItem) -> Unit,
+    onRequestMarkDone: (MonthlyActionItem) -> Unit,
+    onFlagScore: () -> Unit,
+    onFlagAction: (MonthlyActionItem) -> Unit
 ) {
     val deltaColor = when {
         report.previousScore == null -> MintPrimary
@@ -441,11 +543,13 @@ private fun MonthlyReportTabContent(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        // Hero Score + Delta Card
+        // Hero Score + Delta Card (Tappable to open full Money Health Score Breakdown)
         item {
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .clickable(onClick = onOpenScoreDetail)
                     .testTag("monthly_report_hero_card"),
                 shape = RoundedCornerShape(16.dp),
                 colors = CardDefaults.cardColors(containerColor = MintPrimary.copy(alpha = 0.14f))
@@ -456,7 +560,7 @@ private fun MonthlyReportTabContent(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column {
+                        Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 text = "MONEY HEALTH SCORE (${report.currentMonthKey})",
                                 style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp),
@@ -485,25 +589,49 @@ private fun MonthlyReportTabContent(
                         }
                     }
 
+                    report.tracedScore?.let { traced ->
+                        Text(
+                            text = "Last calculated: ${traced.calculatedAtFormatted} • Tap for full breakdown & chart ->",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                            color = MintPrimary
+                        )
+                    }
+
+                    DataQualityBadgeRow(notes = report.dataQualityNotes)
+
                     Text(
                         text = report.summary,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurface
                     )
 
-                    Button(
-                        onClick = onRequestSaveSnapshot,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("save_monthly_snapshot_btn"),
-                        colors = ButtonDefaults.buttonColors(containerColor = MintPrimary)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(Icons.Default.BookmarkAdded, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = if (hasSavedCurrentMonth) "Update ${report.currentMonthKey} Snapshot" else "Save Monthly Snapshot",
-                            fontWeight = FontWeight.Bold
-                        )
+                        Button(
+                            onClick = onRequestSaveSnapshot,
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("save_monthly_snapshot_btn"),
+                            colors = ButtonDefaults.buttonColors(containerColor = MintPrimary)
+                        ) {
+                            Icon(Icons.Default.BookmarkAdded, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = if (hasSavedCurrentMonth) "Update ${report.currentMonthKey}" else "Save Snapshot",
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        TextButton(
+                            onClick = onFlagScore,
+                            modifier = Modifier.testTag("flag_monthly_score_btn")
+                        ) {
+                            Icon(Icons.Default.Flag, contentDescription = "This looks wrong", tint = FinanceRed, modifier = Modifier.size(15.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("This looks wrong", color = FinanceRed, fontSize = 11.sp)
+                        }
                     }
                 }
             }
@@ -601,28 +729,63 @@ private fun MonthlyReportTabContent(
 
         // Top 3 Specific Actions for Next Month
         item {
-            Text(
-                text = "Top 3 Actions for Next Month",
-                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                color = MaterialTheme.colorScheme.primary
-            )
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    text = "Top 3 Actions for Next Month",
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                    color = MaterialTheme.colorScheme.primary
+                )
+                DataQualityBadgeRow(notes = report.dataQualityNotes)
+            }
         }
 
         items(report.top3Actions) { action ->
+            val isDone = completedActionKeys.contains(action.actionKey)
+            val expectedDelta = action.traceability?.expectedScoreDelta ?: 0
             Card(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("top_action_card_${action.priority}"),
                 shape = RoundedCornerShape(14.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))
+                colors = CardDefaults.cardColors(
+                    containerColor = if (isDone) FinanceGreen.copy(alpha = 0.12f)
+                    else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+                )
             ) {
-                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Surface(shape = CircleShape, color = MintPrimary.copy(alpha = 0.2f), modifier = Modifier.size(26.dp)) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Text("${action.priority}", fontWeight = FontWeight.Bold, color = MintPrimary, fontSize = 12.sp)
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                            Surface(
+                                shape = CircleShape,
+                                color = (if (isDone) FinanceGreen else MintPrimary).copy(alpha = 0.2f),
+                                modifier = Modifier.size(26.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Text(
+                                        text = if (isDone) "✓" else "${action.priority}",
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isDone) FinanceGreen else MintPrimary,
+                                        fontSize = 12.sp
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(action.title, style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold))
+                        }
+                        if (action.ruleId.isNotBlank()) {
+                            Surface(color = MintPrimary.copy(alpha = 0.14f), shape = RoundedCornerShape(6.dp)) {
+                                Text(
+                                    text = action.ruleId.removePrefix("RULE_"),
+                                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, fontWeight = FontWeight.Bold),
+                                    color = MintPrimary,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
                             }
                         }
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Text(action.title, style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold))
                     }
                     Text("What: ${action.what}", style = MaterialTheme.typography.bodySmall)
                     Row(
@@ -639,6 +802,55 @@ private fun MonthlyReportTabContent(
                             style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                    }
+                    if (expectedDelta > 0) {
+                        Text(
+                            text = "Code-estimated effect: +$expectedDelta score pts (${report.currentScore} -> ${action.traceability?.projectedNewScore})",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                            color = FinanceGreen
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedButton(
+                            onClick = { onWhyAction(action) },
+                            modifier = Modifier.testTag("why_action_btn_${action.priority}"),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                        ) {
+                            Icon(Icons.Default.HelpOutline, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Why this?", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        }
+
+                        Button(
+                            onClick = { onRequestMarkDone(action) },
+                            enabled = !isDone,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (isDone) FinanceGreen else MintPrimary
+                            ),
+                            modifier = Modifier.testTag("mark_action_done_btn_${action.priority}"),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                        ) {
+                            Text(if (isDone) "Done ✓" else "Done", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+
+                        Spacer(modifier = Modifier.weight(1f))
+
+                        IconButton(
+                            onClick = { onFlagAction(action) },
+                            modifier = Modifier.testTag("flag_action_btn_${action.priority}")
+                        ) {
+                            Icon(
+                                Icons.Default.Flag,
+                                contentDescription = "This looks wrong",
+                                tint = FinanceRed,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
                     }
                 }
             }

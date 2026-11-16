@@ -24,8 +24,18 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material.icons.filled.Flag
+import androidx.compose.material.icons.filled.WarningAmber
+import androidx.compose.ui.text.style.TextOverflow
 import com.example.model.CurrenciesAndCountries
+import com.example.model.DataQualityNote
 import com.example.ui.theme.*
+
+val LocalActivityLogger = staticCompositionLocalOf<((category: String, title: String, whatChanged: String, whySummary: String, numbersSummary: String, ruleId: String?) -> Unit)?> {
+    null
+}
 
 @Composable
 fun PersistentDisclaimerBanner(
@@ -368,16 +378,24 @@ private fun ConsentBullet(title: String, description: String) {
     }
 }
 
-// === CONFIRM-BEFORE-ACTION DIALOG (FEATURE 9) ===
+// === CONFIRM-BEFORE-ACTION DIALOG WITH HUMAN VALIDATION STEP ===
 @Composable
 fun ConfirmActionDialog(
     title: String,
     summaryLines: List<String>,
     confirmLabel: String = "Confirm & Apply",
     isDestructive: Boolean = false,
+    whyText: String? = null,
+    backingNumbers: String? = null,
+    ruleId: String? = null,
+    activityCategory: String = "Confirmed Change",
+    requireReviewCheck: Boolean = true,
     onConfirm: () -> Unit,
     onDismiss: () -> Unit
 ) {
+    val activityLogger = LocalActivityLogger.current
+    var reviewedChecked by remember(title, summaryLines) { mutableStateOf(false) }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
@@ -394,8 +412,8 @@ fun ConfirmActionDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    text = "Please review this change before applying:",
-                    style = MaterialTheme.typography.bodySmall,
+                    text = "What will change:",
+                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Surface(
@@ -415,8 +433,60 @@ fun ConfirmActionDialog(
                         }
                     }
                 }
+
+                if (!whyText.isNullOrBlank()) {
+                    Text(
+                        text = "Why: $whyText",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+
+                if (!backingNumbers.isNullOrBlank()) {
+                    Surface(
+                        color = MintPrimary.copy(alpha = 0.1f),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "Backing numbers: $backingNumbers",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                            color = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.padding(8.dp)
+                        )
+                    }
+                }
+
+                if (requireReviewCheck) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .defaultMinSize(minHeight = 48.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable { reviewedChecked = !reviewedChecked }
+                            .testTag("confirm_reviewed_checkbox")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Checkbox(
+                                checked = reviewedChecked,
+                                onCheckedChange = { reviewedChecked = it }
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "I reviewed this summary and want to apply this change.",
+                                style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold)
+                            )
+                        }
+                    }
+                }
+
                 Text(
-                    text = "Reminder: GrowMint tracks your virtual plan and NEVER moves real money.",
+                    text = "Educational guidance only. GrowMint NEVER moves real money.",
                     style = MaterialTheme.typography.labelSmall,
                     color = MintPrimary
                 )
@@ -424,7 +494,14 @@ fun ConfirmActionDialog(
         },
         confirmButton = {
             Button(
-                onClick = onConfirm,
+                onClick = {
+                    val cleanWhat = summaryLines.joinToString("; ")
+                    val cleanWhy = whyText?.ifBlank { "Reviewed and approved by user" } ?: "Reviewed and approved by user"
+                    val cleanNums = backingNumbers ?: summaryLines.firstOrNull().orEmpty()
+                    activityLogger?.invoke(activityCategory, title, cleanWhat, cleanWhy, cleanNums, ruleId)
+                    onConfirm()
+                },
+                enabled = !requireReviewCheck || reviewedChecked,
                 colors = ButtonDefaults.buttonColors(
                     containerColor = if (isDestructive) FinanceRed else MintPrimary
                 ),
@@ -550,4 +627,161 @@ fun SafetyBufferGateCard(
         }
     }
 }
+
+// === DATA QUALITY INDICATOR ROW ===
+@Composable
+fun DataQualityBadgeRow(
+    notes: List<DataQualityNote>,
+    modifier: Modifier = Modifier
+) {
+    if (notes.isEmpty()) return
+    var selectedNote by remember { mutableStateOf<DataQualityNote?>(null) }
+
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .testTag("data_quality_badge_row"),
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        notes.forEach { note ->
+            val badgeColor = if (note.isLowQuality) MintAccentGold else FinanceGreen
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = badgeColor.copy(alpha = 0.16f),
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable { selectedNote = note }
+                    .testTag("dq_badge_${note.id}")
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = if (note.isLowQuality) Icons.Default.WarningAmber else Icons.Default.Info,
+                        contentDescription = null,
+                        tint = badgeColor,
+                        modifier = Modifier.size(13.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = note.label,
+                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, fontWeight = FontWeight.Bold),
+                        color = badgeColor,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        }
+    }
+
+    selectedNote?.let { note ->
+        AlertDialog(
+            onDismissRequest = { selectedNote = null },
+            title = { Text(note.label, fontWeight = FontWeight.Bold) },
+            text = {
+                Text(
+                    text = note.detail,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { selectedNote = null }) { Text("Got it") }
+            }
+        )
+    }
+}
+
+// === REPORT AN ERROR ("THIS LOOKS WRONG") DIALOG ===
+@Composable
+fun ReportErrorDialog(
+    itemTitle: String,
+    contextSummary: String,
+    ruleId: String? = null,
+    onSubmit: (note: String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var noteText by remember { mutableStateOf("") }
+    val quickTags = listOf(
+        "Numbers seem off",
+        "Missing transaction or income",
+        "Debt / goal already updated",
+        "Action doesn't fit my situation"
+    )
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Flag, contentDescription = null, tint = FinanceRed)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("This Looks Wrong", fontWeight = FontWeight.Bold)
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "Flag \"$itemTitle\" with a short note. It is saved locally on your device for review in Activity History.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (contextSummary.isNotBlank()) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = contextSummary + (if (!ruleId.isNullOrBlank()) "\nRule: $ruleId" else ""),
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.padding(8.dp)
+                        )
+                    }
+                }
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    quickTags.forEach { tag ->
+                        SuggestionChip(
+                            onClick = { noteText = tag },
+                            label = { Text(tag, fontSize = 11.sp) }
+                        )
+                    }
+                }
+                OutlinedTextField(
+                    value = noteText,
+                    onValueChange = { noteText = it },
+                    label = { Text("What looks wrong?") },
+                    placeholder = { Text("e.g., My rent payment wasn't included yet") },
+                    minLines = 2,
+                    maxLines = 4,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("report_error_note_input")
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    if (noteText.isNotBlank()) {
+                        onSubmit(noteText.trim())
+                    }
+                },
+                enabled = noteText.isNotBlank(),
+                colors = ButtonDefaults.buttonColors(containerColor = FinanceRed),
+                modifier = Modifier.testTag("submit_error_flag_btn")
+            ) {
+                Text("Save Flag", fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
+}
+
 

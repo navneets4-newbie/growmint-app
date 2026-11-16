@@ -108,6 +108,19 @@ class GrowMintRepository(private val context: Context) {
     private val _pendingIncomeForSplit = MutableStateFlow<Pair<Double, String>?>(null)
     val pendingIncomeForSplit: StateFlow<Pair<Double, String>?> = _pendingIncomeForSplit.asStateFlow()
 
+    // === TRACEABILITY, SCORE HISTORY, ACTIVITY HISTORY & ERROR FLAGS ===
+    private val _scoreHistory = MutableStateFlow(loadScoreHistory())
+    val scoreHistory: StateFlow<List<ScoreHistorySnapshot>> = _scoreHistory.asStateFlow()
+
+    private val _completedActionKeys = MutableStateFlow(loadCompletedActionKeys())
+    val completedActionKeys: StateFlow<Set<String>> = _completedActionKeys.asStateFlow()
+
+    private val _activityHistory = MutableStateFlow(loadActivityHistory())
+    val activityHistory: StateFlow<List<ActivityHistoryEntry>> = _activityHistory.asStateFlow()
+
+    private val _errorFlags = MutableStateFlow(loadErrorFlags())
+    val errorFlags: StateFlow<List<ErrorFlagEntry>> = _errorFlags.asStateFlow()
+
     fun updateThemeMode(mode: AppThemeMode) {
         setThemeMode(mode)
     }
@@ -1309,6 +1322,10 @@ class GrowMintRepository(private val context: Context) {
         _recentCategories.value = emptyList()
         _lastImportBatch.value = null
         _pendingIncomeForSplit.value = null
+        _scoreHistory.value = emptyList()
+        _completedActionKeys.value = emptySet()
+        _activityHistory.value = emptyList()
+        _errorFlags.value = emptyList()
     }
 
     fun deleteAllUserData() {
@@ -2002,6 +2019,308 @@ class GrowMintRepository(private val context: Context) {
             )
         } catch (_: Exception) {
             null
+        }
+    }
+
+    // === TRACEABILITY: SCORE HISTORY SNAPSHOTS, ACTION COMPLETION, ACTIVITY HISTORY & ERROR FLAGS ===
+
+    fun recordScoreSnapshotIfChanged(nowMillis: Long = System.currentTimeMillis()): ScoreHistorySnapshot {
+        val snap = FinancialCalculator.buildScoreHistorySnapshot(
+            profile = _userProfile.value,
+            envelopes = _envelopes.value,
+            transactions = _transactions.value,
+            nowMillis = nowMillis
+        )
+        val currentList = _scoreHistory.value
+        val latest = currentList.lastOrNull()
+        val hasMeaningfulChange = latest == null ||
+            latest.totalScore != snap.totalScore ||
+            latest.bufferScore != snap.bufferScore ||
+            latest.spendingScore != snap.spendingScore ||
+            latest.savingsScore != snap.savingsScore ||
+            latest.debtScore != snap.debtScore ||
+            kotlin.math.abs(latest.bufferAmount - snap.bufferAmount) >= 1.0 ||
+            kotlin.math.abs(latest.totalDebt - snap.totalDebt) >= 1.0 ||
+            latest.transactionCount != snap.transactionCount
+
+        if (hasMeaningfulChange) {
+            val updated = (currentList + snap).sortedBy { it.timestamp }.takeLast(60)
+            _scoreHistory.value = updated
+            saveScoreHistory(updated)
+        }
+        return snap
+    }
+
+    fun markActionDone(
+        actionKey: String,
+        title: String,
+        whatSummary: String,
+        whySummary: String,
+        numbersSummary: String,
+        ruleId: String?
+    ) {
+        if (actionKey.isBlank()) return
+        val next = _completedActionKeys.value + actionKey
+        _completedActionKeys.value = next
+        saveCompletedActionKeys(next)
+        logConfirmedActivity(
+            category = "Action Completed",
+            title = title,
+            whatChanged = whatSummary,
+            whySummary = whySummary,
+            numbersSummary = numbersSummary,
+            ruleId = ruleId
+        )
+    }
+
+    fun logConfirmedActivity(
+        category: String,
+        title: String,
+        whatChanged: String,
+        whySummary: String = "",
+        numbersSummary: String = "",
+        ruleId: String? = null,
+        timestamp: Long = System.currentTimeMillis()
+    ) {
+        val entry = ActivityHistoryEntry(
+            timestamp = timestamp,
+            category = category,
+            title = title,
+            whatChanged = whatChanged,
+            whySummary = whySummary,
+            numbersSummary = numbersSummary,
+            ruleId = ruleId
+        )
+        val updated = (listOf(entry) + _activityHistory.value).take(200)
+        _activityHistory.value = updated
+        saveActivityHistory(updated)
+    }
+
+    fun flagItemError(
+        itemType: String,
+        itemId: String,
+        itemTitle: String,
+        note: String,
+        snapshotSummary: String = "",
+        ruleId: String? = null
+    ) {
+        val cleanNote = note.trim().ifBlank { "Flagged for review by user." }
+        val flag = ErrorFlagEntry(
+            itemType = itemType,
+            itemId = itemId,
+            itemTitle = itemTitle,
+            note = cleanNote,
+            snapshotSummary = snapshotSummary,
+            ruleId = ruleId
+        )
+        val updated = (listOf(flag) + _errorFlags.value).take(100)
+        _errorFlags.value = updated
+        saveErrorFlags(updated)
+    }
+
+    fun clearErrorFlag(flagId: String) {
+        val updated = _errorFlags.value.filterNot { it.id == flagId }
+        _errorFlags.value = updated
+        saveErrorFlags(updated)
+    }
+
+    fun exportActivityHistoryCsv(): String {
+        val fmt = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US)
+        fun esc(s: String): String = "\"${s.replace("\"", "\"\"")}\""
+        val sb = StringBuilder()
+        sb.append("Timestamp,Date,Category,Title,WhatChanged,Why,BackingNumbers,RuleId\n")
+        _activityHistory.value.forEach { e ->
+            val dateStr = fmt.format(java.util.Date(e.timestamp))
+            sb.append("${e.timestamp},${esc(dateStr)},${esc(e.category)},${esc(e.title)},${esc(e.whatChanged)},${esc(e.whySummary)},${esc(e.numbersSummary)},${esc(e.ruleId ?: "")}\n")
+        }
+        return sb.toString()
+    }
+
+    fun exportActivityHistoryText(): String {
+        val fmt = java.text.SimpleDateFormat("MMM dd, yyyy HH:mm", java.util.Locale.US)
+        val sb = StringBuilder()
+        sb.append("GrowMint Activity History & Error Flags\n")
+        sb.append("=======================================\n\n")
+        if (_activityHistory.value.isEmpty()) {
+            sb.append("No confirmed changes logged yet.\n")
+        } else {
+            _activityHistory.value.forEach { e ->
+                sb.append("[${fmt.format(java.util.Date(e.timestamp))}] ${e.category}: ${e.title}\n")
+                sb.append("  What changed: ${e.whatChanged}\n")
+                if (e.whySummary.isNotBlank()) sb.append("  Why: ${e.whySummary}\n")
+                if (e.numbersSummary.isNotBlank()) sb.append("  Numbers: ${e.numbersSummary}\n")
+                if (!e.ruleId.isNullOrBlank()) sb.append("  Rule ID: ${e.ruleId}\n")
+                sb.append("\n")
+            }
+        }
+        if (_errorFlags.value.isNotEmpty()) {
+            sb.append("Flagged Items (This looks wrong)\n")
+            sb.append("---------------------------------\n")
+            _errorFlags.value.forEach { f ->
+                sb.append("[${fmt.format(java.util.Date(f.timestamp))}] ${f.itemType} - ${f.itemTitle}\n")
+                sb.append("  Note: ${f.note}\n")
+                if (f.snapshotSummary.isNotBlank()) sb.append("  Context: ${f.snapshotSummary}\n")
+                if (!f.ruleId.isNullOrBlank()) sb.append("  Rule ID: ${f.ruleId}\n")
+                sb.append("\n")
+            }
+        }
+        return sb.toString()
+    }
+
+    private fun saveScoreHistory(list: List<ScoreHistorySnapshot>) {
+        val arr = JSONArray()
+        list.forEach { s ->
+            arr.put(JSONObject().apply {
+                put("id", s.id)
+                put("timestamp", s.timestamp)
+                put("dateLabel", s.dateLabel)
+                put("totalScore", s.totalScore)
+                put("bufferScore", s.bufferScore)
+                put("spendingScore", s.spendingScore)
+                put("savingsScore", s.savingsScore)
+                put("debtScore", s.debtScore)
+                put("bufferAmount", s.bufferAmount)
+                put("typicalMonthlySpending", s.typicalMonthlySpending)
+                put("effectiveIncome", s.effectiveIncome)
+                put("actualSpending", s.actualSpending)
+                put("savingsRatePercent", s.savingsRatePercent)
+                put("totalDebt", s.totalDebt)
+                put("transactionCount", s.transactionCount)
+                put("transactionSpanDays", s.transactionSpanDays)
+                val rArr = JSONArray()
+                s.triggeredRuleIds.forEach { rArr.put(it) }
+                put("triggeredRuleIds", rArr)
+            })
+        }
+        prefs.edit().putString("score_history_snapshots_json", arr.toString()).apply()
+    }
+
+    private fun loadScoreHistory(): List<ScoreHistorySnapshot> {
+        val raw = prefs.getString("score_history_snapshots_json", null) ?: return emptyList()
+        return try {
+            val arr = JSONArray(raw)
+            (0 until arr.length()).map { i ->
+                val o = arr.getJSONObject(i)
+                val rArr = o.optJSONArray("triggeredRuleIds") ?: JSONArray()
+                val rules = (0 until rArr.length()).map { rArr.getString(it) }
+                ScoreHistorySnapshot(
+                    id = o.optString("id", java.util.UUID.randomUUID().toString()),
+                    timestamp = o.getLong("timestamp"),
+                    dateLabel = o.optString("dateLabel", ""),
+                    totalScore = o.getInt("totalScore"),
+                    bufferScore = o.getInt("bufferScore"),
+                    spendingScore = o.getInt("spendingScore"),
+                    savingsScore = o.getInt("savingsScore"),
+                    debtScore = o.getInt("debtScore"),
+                    bufferAmount = o.optDouble("bufferAmount", 0.0),
+                    typicalMonthlySpending = o.optDouble("typicalMonthlySpending", 0.0),
+                    effectiveIncome = o.optDouble("effectiveIncome", 0.0),
+                    actualSpending = o.optDouble("actualSpending", 0.0),
+                    savingsRatePercent = o.optDouble("savingsRatePercent", 0.0),
+                    totalDebt = o.optDouble("totalDebt", 0.0),
+                    transactionCount = o.optInt("transactionCount", 0),
+                    transactionSpanDays = o.optInt("transactionSpanDays", 0),
+                    triggeredRuleIds = rules
+                )
+            }.sortedBy { it.timestamp }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun saveCompletedActionKeys(keys: Set<String>) {
+        val arr = JSONArray()
+        keys.forEach { arr.put(it) }
+        prefs.edit().putString("completed_action_keys_json", arr.toString()).apply()
+    }
+
+    private fun loadCompletedActionKeys(): Set<String> {
+        val raw = prefs.getString("completed_action_keys_json", null) ?: return emptySet()
+        return try {
+            val arr = JSONArray(raw)
+            (0 until arr.length()).map { arr.getString(it) }.toSet()
+        } catch (_: Exception) {
+            emptySet()
+        }
+    }
+
+    private fun saveActivityHistory(list: List<ActivityHistoryEntry>) {
+        val arr = JSONArray()
+        list.forEach { a ->
+            arr.put(JSONObject().apply {
+                put("id", a.id)
+                put("timestamp", a.timestamp)
+                put("category", a.category)
+                put("title", a.title)
+                put("whatChanged", a.whatChanged)
+                put("whySummary", a.whySummary)
+                put("numbersSummary", a.numbersSummary)
+                put("ruleId", a.ruleId ?: "")
+            })
+        }
+        prefs.edit().putString("activity_history_json", arr.toString()).apply()
+    }
+
+    private fun loadActivityHistory(): List<ActivityHistoryEntry> {
+        val raw = prefs.getString("activity_history_json", null) ?: return emptyList()
+        return try {
+            val arr = JSONArray(raw)
+            (0 until arr.length()).map { i ->
+                val o = arr.getJSONObject(i)
+                val rId = o.optString("ruleId", "").ifBlank { null }
+                ActivityHistoryEntry(
+                    id = o.optString("id", java.util.UUID.randomUUID().toString()),
+                    timestamp = o.getLong("timestamp"),
+                    category = o.optString("category", "Change"),
+                    title = o.getString("title"),
+                    whatChanged = o.optString("whatChanged", ""),
+                    whySummary = o.optString("whySummary", ""),
+                    numbersSummary = o.optString("numbersSummary", ""),
+                    ruleId = rId
+                )
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun saveErrorFlags(list: List<ErrorFlagEntry>) {
+        val arr = JSONArray()
+        list.forEach { f ->
+            arr.put(JSONObject().apply {
+                put("id", f.id)
+                put("timestamp", f.timestamp)
+                put("itemType", f.itemType)
+                put("itemId", f.itemId)
+                put("itemTitle", f.itemTitle)
+                put("note", f.note)
+                put("snapshotSummary", f.snapshotSummary)
+                put("ruleId", f.ruleId ?: "")
+            })
+        }
+        prefs.edit().putString("error_flags_json", arr.toString()).apply()
+    }
+
+    private fun loadErrorFlags(): List<ErrorFlagEntry> {
+        val raw = prefs.getString("error_flags_json", null) ?: return emptyList()
+        return try {
+            val arr = JSONArray(raw)
+            (0 until arr.length()).map { i ->
+                val o = arr.getJSONObject(i)
+                val rId = o.optString("ruleId", "").ifBlank { null }
+                ErrorFlagEntry(
+                    id = o.optString("id", java.util.UUID.randomUUID().toString()),
+                    timestamp = o.getLong("timestamp"),
+                    itemType = o.optString("itemType", "ITEM"),
+                    itemId = o.optString("itemId", ""),
+                    itemTitle = o.optString("itemTitle", ""),
+                    note = o.optString("note", ""),
+                    snapshotSummary = o.optString("snapshotSummary", ""),
+                    ruleId = rId
+                )
+            }
+        } catch (_: Exception) {
+            emptyList()
         }
     }
 }

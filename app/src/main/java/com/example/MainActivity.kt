@@ -22,11 +22,13 @@ import com.example.ai.AiCoachManager
 import com.example.data.FinancialCalculator
 import com.example.data.GrowMintRepository
 import com.example.data.TransactionImportEngine
+import com.example.model.ActionTargetDestination
 import com.example.model.AppThemeMode
 import com.example.model.CsvParsePreview
 import com.example.model.ExtractionBatchResult
 import com.example.model.LedgerTransaction
 import com.example.ui.coach.AiCoachScreen
+import com.example.ui.components.LocalActivityLogger
 import com.example.ui.dashboard.DashboardScreen
 import com.example.ui.onboarding.OnboardingScreen
 import com.example.ui.settings.SettingsScreen
@@ -42,6 +44,9 @@ import com.example.ui.tools.ScamCheckerScreen
 import com.example.ui.tools.SideHustleTrackerScreen
 import com.example.ui.tools.WeeklyCheckInAndLessonsScreen
 import com.example.ui.tools.WhatIfSimulatorScreen
+import com.example.ui.traceability.ActivityHistoryScreen
+import com.example.ui.traceability.HowGrowMintDecidesScreen
+import com.example.ui.traceability.ScoreDetailScreen
 import com.example.ui.trading.PaperTradingScreen
 import com.example.ui.transactions.CsvImportAndMappingDialog
 import com.example.ui.transactions.PasteImportDialog
@@ -73,7 +78,10 @@ enum class ToolSubScreen {
     IDEAS_LAB,
     DEBT_PLANNER,
     NET_WORTH,
-    GOAL_PLANNER
+    GOAL_PLANNER,
+    SCORE_DETAIL,
+    HOW_DECIDES,
+    ACTIVITY_HISTORY
 }
 
 class MainActivity : ComponentActivity() {
@@ -121,6 +129,24 @@ class MainActivity : ComponentActivity() {
             val lastImportBatch by repository.lastImportBatch.collectAsStateWithLifecycle()
             val pendingIncomeForSplit by repository.pendingIncomeForSplit.collectAsStateWithLifecycle()
 
+            // Traceability, score history & confirmation flows
+            val scoreHistory by repository.scoreHistory.collectAsStateWithLifecycle()
+            val completedActionKeys by repository.completedActionKeys.collectAsStateWithLifecycle()
+            val activityHistory by repository.activityHistory.collectAsStateWithLifecycle()
+            val errorFlags by repository.errorFlags.collectAsStateWithLifecycle()
+
+            CompositionLocalProvider(
+                LocalActivityLogger provides { category, title, whatChanged, whySummary, numbersSummary, ruleId ->
+                    repository.logConfirmedActivity(
+                        category = category,
+                        title = title,
+                        whatChanged = whatChanged,
+                        whySummary = whySummary,
+                        numbersSummary = numbersSummary,
+                        ruleId = ruleId
+                    )
+                }
+            ) {
             GrowMintTheme(themeMode = themeMode) {
                 var currentScreen by remember { mutableStateOf(AppScreen.DASHBOARD) }
                 var activeToolScreen by remember { mutableStateOf<ToolSubScreen?>(null) }
@@ -161,6 +187,34 @@ class MainActivity : ComponentActivity() {
                                     csvPreviewState = preview
                                 }
                             }
+                        }
+                    }
+                }
+
+                val exportActivityCsvLauncher = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.CreateDocument("text/csv")
+                ) { uri ->
+                    if (uri != null) {
+                        scope.launch(Dispatchers.IO) {
+                            try {
+                                contentResolver.openOutputStream(uri)?.bufferedWriter()?.use {
+                                    it.write(repository.exportActivityHistoryCsv())
+                                }
+                            } catch (_: Exception) { }
+                        }
+                    }
+                }
+
+                val exportActivityTextLauncher = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.CreateDocument("text/plain")
+                ) { uri ->
+                    if (uri != null) {
+                        scope.launch(Dispatchers.IO) {
+                            try {
+                                contentResolver.openOutputStream(uri)?.bufferedWriter()?.use {
+                                    it.write(repository.exportActivityHistoryText())
+                                }
+                            } catch (_: Exception) { }
                         }
                     }
                 }
@@ -232,13 +286,17 @@ class MainActivity : ComponentActivity() {
                             val priorHealthSnapshot = remember(monthlyHealthSnapshots, currentMonthKey) {
                                 monthlyHealthSnapshots.filter { it.monthKey < currentMonthKey }.maxByOrNull { it.monthKey }
                             }
-                            val monthlyImprovementReport = remember(profile, envelopes, transactions, priorHealthSnapshot) {
+                            val monthlyImprovementReport = remember(profile, envelopes, transactions, priorHealthSnapshot, calendarItems) {
                                 FinancialCalculator.calculateMonthlyImprovementReport(
                                     profile = profile,
                                     envelopes = envelopes,
                                     transactions = transactions,
-                                    previousSnapshot = priorHealthSnapshot
+                                    previousSnapshot = priorHealthSnapshot,
+                                    calendarItems = calendarItems
                                 )
+                            }
+                            LaunchedEffect(monthlyImprovementReport.currentSnapshot) {
+                                repository.recordScoreSnapshotIfChanged()
                             }
                             val netWorthSummary = remember(assets, bankConnection, profile.debts, profile.currentBalance) {
                                 FinancialCalculator.calculateNetWorthSummary(
@@ -254,6 +312,21 @@ class MainActivity : ComponentActivity() {
                                 prefilledSplitIncome = amt to src
                                 activeToolScreen = null
                                 currentScreen = AppScreen.SPLIT
+                            }
+                            val navigateToActionDestination: (ActionTargetDestination) -> Unit = { dest ->
+                                when (dest) {
+                                    ActionTargetDestination.TRANSACTIONS -> activeToolScreen = ToolSubScreen.TRANSACTIONS
+                                    ActionTargetDestination.SPLIT -> {
+                                        activeToolScreen = null
+                                        currentScreen = AppScreen.SPLIT
+                                    }
+                                    ActionTargetDestination.DEBT_PLANNER -> {
+                                        activeToolScreen = if (profile.isUnder18) ToolSubScreen.GOAL_PLANNER else ToolSubScreen.DEBT_PLANNER
+                                    }
+                                    ActionTargetDestination.GOAL_PLANNER -> activeToolScreen = ToolSubScreen.GOAL_PLANNER
+                                    ActionTargetDestination.CALENDAR -> activeToolScreen = ToolSubScreen.CALENDAR
+                                    ActionTargetDestination.NET_WORTH -> activeToolScreen = ToolSubScreen.NET_WORTH
+                                }
                             }
 
                             val reviewBatch = pendingReviewBatch
@@ -339,6 +412,27 @@ class MainActivity : ComponentActivity() {
                                         onLogNoSpendDay = { repository.logNoSpendDay() },
                                         onCompleteWeeklyCheckIn = { repository.completeWeeklyCheckIn() },
                                         onSaveMonthlySnapshot = { snap -> repository.saveMonthlyHealthSnapshot(snap) },
+                                        coachManager = coachManager,
+                                        completedActionKeys = completedActionKeys,
+                                        onMarkActionDone = { action ->
+                                            val nums = action.traceability?.triggeringNumbers
+                                                ?.joinToString("; ") { "${it.label}: ${it.valueFormatted}" }
+                                                ?: action.howMuch
+                                            repository.markActionDone(
+                                                actionKey = action.actionKey,
+                                                title = action.title,
+                                                whatSummary = "Completed ${action.title} (${action.howMuch})",
+                                                whySummary = action.traceability?.ruleDescription ?: action.what,
+                                                numbersSummary = nums,
+                                                ruleId = action.ruleId.ifBlank { null }
+                                            )
+                                        },
+                                        onFlagError = { itemType, itemId, itemTitle, note, snapshotSummary, ruleId ->
+                                            repository.flagItemError(itemType, itemId, itemTitle, note, snapshotSummary, ruleId)
+                                        },
+                                        onOpenScoreDetail = { activeToolScreen = ToolSubScreen.SCORE_DETAIL },
+                                        onOpenHowDecides = { activeToolScreen = ToolSubScreen.HOW_DECIDES },
+                                        onNavigateActionDestination = navigateToActionDestination,
                                         onBack = { activeToolScreen = null }
                                     )
                                     ToolSubScreen.IDEAS_LAB -> IncomeIdeasLabScreen(
@@ -367,6 +461,38 @@ class MainActivity : ComponentActivity() {
                                         onAddGoal = { goal -> repository.addGoalItem(goal) },
                                         onUpdateGoalSaved = { id, amt -> repository.updateGoalSavedAmount(id, amt) },
                                         onDeleteGoal = { id -> repository.deleteGoalItem(id) },
+                                        onBack = { activeToolScreen = null }
+                                    )
+                                    ToolSubScreen.SCORE_DETAIL -> {
+                                        val traced = monthlyImprovementReport.tracedScore
+                                            ?: FinancialCalculator.calculateTracedMoneyHealthScore(profile, envelopes, transactions)
+                                        ScoreDetailScreen(
+                                            tracedScore = traced,
+                                            scoreHistory = scoreHistory,
+                                            currencyCode = profile.currencyCode,
+                                            onOpenHowDecides = { activeToolScreen = ToolSubScreen.HOW_DECIDES },
+                                            onOpenActivityHistory = { activeToolScreen = ToolSubScreen.ACTIVITY_HISTORY },
+                                            onFlagError = { itemType, itemId, itemTitle, note, snapshotSummary, ruleId ->
+                                                repository.flagItemError(itemType, itemId, itemTitle, note, snapshotSummary, ruleId)
+                                            },
+                                            onBack = { activeToolScreen = null }
+                                        )
+                                    }
+                                    ToolSubScreen.HOW_DECIDES -> HowGrowMintDecidesScreen(
+                                        onBack = { activeToolScreen = null }
+                                    )
+                                    ToolSubScreen.ACTIVITY_HISTORY -> ActivityHistoryScreen(
+                                        activityHistory = activityHistory,
+                                        errorFlags = errorFlags,
+                                        onExportCsv = {
+                                            exportActivityCsvLauncher.launch("growmint_activity_history.csv")
+                                        },
+                                        onExportText = {
+                                            exportActivityTextLauncher.launch("growmint_activity_history.txt")
+                                        },
+                                        onGetPreviewCsv = { repository.exportActivityHistoryCsv() },
+                                        onGetPreviewText = { repository.exportActivityHistoryText() },
+                                        onClearFlag = { flagId -> repository.clearErrorFlag(flagId) },
                                         onBack = { activeToolScreen = null }
                                     )
                                 }
@@ -566,6 +692,10 @@ class MainActivity : ComponentActivity() {
                                                 onDeleteMerchantRule = { id ->
                                                     repository.deleteMerchantRule(id)
                                                 },
+                                                onOpenHowDecides = { activeToolScreen = ToolSubScreen.HOW_DECIDES },
+                                                onOpenActivityHistory = { activeToolScreen = ToolSubScreen.ACTIVITY_HISTORY },
+                                                activityCount = activityHistory.size,
+                                                errorFlagCount = errorFlags.size,
                                                 modifier = Modifier.padding(innerPadding)
                                             )
                                         }
@@ -673,6 +803,7 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
+            }
             }
         }
     }

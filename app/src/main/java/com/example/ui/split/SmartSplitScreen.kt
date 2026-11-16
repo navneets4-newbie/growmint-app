@@ -681,6 +681,10 @@ fun SmartSplitScreen(
             summaryLines = adjustedRules.map { "${it.envelopeType.displayName}: ${it.percentage}%" } +
                 (if (!bufferStatus.isInvestingUnlocked) listOf("Investing share automatically redirected until buffer is met.") else emptyList()),
             confirmLabel = "Apply Preset",
+            whyText = if (!bufferStatus.isInvestingUnlocked) "Safety-first rule redirects investing splits until your emergency buffer target is met." else "Updates your Auto-Split allocation percentages.",
+            backingNumbers = adjustedRules.joinToString(", ") { "${it.envelopeType.displayName} ${it.percentage}%" },
+            ruleId = if (!bufferStatus.isInvestingUnlocked) com.example.data.RuleRegistry.RULE_BUFFER_FIRST else null,
+            activityCategory = "Allocation",
             onConfirm = {
                 rulesState = adjustedRules
                 onSaveRules(adjustedRules)
@@ -696,6 +700,9 @@ fun SmartSplitScreen(
             title = "Save Split Rules?",
             summaryLines = rulesState.map { "${it.envelopeType.displayName}: ${it.percentage}%" },
             confirmLabel = "Save Rules",
+            whyText = "Saves your custom 100% envelope split rules for future income.",
+            backingNumbers = rulesState.joinToString(", ") { "${it.envelopeType.displayName} ${it.percentage}%" },
+            activityCategory = "Allocation",
             onConfirm = {
                 onSaveRules(rulesState)
                 snackbarMessage = "Rules saved successfully!"
@@ -718,6 +725,10 @@ fun SmartSplitScreen(
                 "$label (${r.percentage}%): ${CurrenciesAndCountries.format(valAmt, profile.currencyCode)}"
             },
             confirmLabel = "Split Now",
+            whyText = if (!bufferStatus.isInvestingUnlocked) "Divides income by your rules; safety gate protects your emergency buffer first." else "Divides income across your virtual envelopes by your saved percentages.",
+            backingNumbers = "Deposit: ${CurrenciesAndCountries.format(amt, profile.currencyCode)} ($src)",
+            ruleId = if (!bufferStatus.isInvestingUnlocked) com.example.data.RuleRegistry.RULE_BUFFER_FIRST else null,
+            activityCategory = "Allocation",
             onConfirm = {
                 onExecuteSplit(amt, src)
                 snackbarMessage = "Split ${CurrenciesAndCountries.format(amt, profile.currencyCode)} into envelopes!"
@@ -733,6 +744,8 @@ fun SmartSplitScreen(
             summaryLines = listOf("Reverts the most recent split from your virtual envelopes and balance."),
             confirmLabel = "Undo Transfer",
             isDestructive = true,
+            whyText = "Reverses the latest virtual envelope transfer.",
+            activityCategory = "Allocation",
             onConfirm = {
                 val undone = onUndoLastTransfer()
                 if (undone) {
@@ -753,6 +766,9 @@ fun SmartSplitScreen(
                 "Applies your Auto-Split buckets immediately."
             ),
             confirmLabel = "Release Salary",
+            whyText = "Pay-yourself-a-salary releases a steady monthly payout from your irregular-income Holding Pot.",
+            backingNumbers = "Pot: ${CurrenciesAndCountries.format(profile.holdingPotBalance, profile.currencyCode)} -> Salary: ${CurrenciesAndCountries.format(profile.monthlySalaryTarget, profile.currencyCode)}",
+            activityCategory = "Allocation",
             onConfirm = {
                 val ok = onReleaseSalary(profile.monthlySalaryTarget)
                 snackbarMessage = if (ok) "Salary released and split!" else "Insufficient Holding Pot balance."

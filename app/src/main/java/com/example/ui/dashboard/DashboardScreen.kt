@@ -26,6 +26,7 @@ import com.example.ToolSubScreen
 import com.example.data.FinancialCalculator
 import com.example.model.*
 import com.example.ui.components.ConfirmActionDialog
+import com.example.ui.components.DataQualityBadgeRow
 import com.example.ui.components.FormattedAmountDisplay
 import com.example.ui.components.HealthScorePill
 import com.example.ui.components.PersistentDisclaimerBanner
@@ -167,9 +168,9 @@ fun DashboardScreen(
 
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             HealthScorePill(
-                                score = healthReport.overallScore,
-                                grade = healthReport.grade,
-                                onClick = { showHealthDialog = true }
+                                score = monthlyReport.currentScore,
+                                grade = monthlyReport.gradeLabel,
+                                onClick = { onOpenTool(ToolSubScreen.SCORE_DETAIL) }
                             )
 
                             Spacer(modifier = Modifier.width(6.dp))
@@ -691,6 +692,7 @@ fun DashboardScreen(
                             text = "Top Next Action: ${monthlyReport.top3Actions.firstOrNull()?.title ?: dailyLesson.title}",
                             style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold)
                         )
+                        DataQualityBadgeRow(notes = monthlyReport.dataQualityNotes)
                         Text(
                             text = "Today's 2-Min Lesson (${dailyLesson.topic}): ${dailyLesson.title}",
                             style = MaterialTheme.typography.labelSmall,
@@ -873,12 +875,12 @@ fun DashboardScreen(
                         modifier = Modifier.weight(1f)
                     )
                     MetricMiniCard(
-                        title = "Financial Health",
-                        customText = "${healthReport.overallScore}/100",
+                        title = "Money Health Score",
+                        customText = "${monthlyReport.currentScore}/100",
                         icon = Icons.Default.Favorite,
-                        badge = "Grade ${healthReport.grade} (Tap for details)",
-                        onClick = { showHealthDialog = true },
-                        modifier = Modifier.weight(1f)
+                        badge = "${monthlyReport.gradeLabel} • Tap for inputs & history",
+                        onClick = { onOpenTool(ToolSubScreen.SCORE_DETAIL) },
+                        modifier = Modifier.weight(1f).testTag("dashboard_money_health_card")
                     )
                 }
             }

@@ -914,4 +914,47 @@ class AiCoachManager {
             emptyMap()
         }
     }
+
+    suspend fun explainActionPlainLanguage(
+        action: MonthlyActionItem,
+        profile: UserProfile
+    ): String {
+        val trace = action.traceability
+        val fallback = if (trace != null) {
+            "Rule ${trace.ruleId} triggered because ${trace.ruleDescription.replaceFirstChar { it.lowercase() }} ${trace.expectedScoreExplanation} (Educational guidance only.)"
+        } else {
+            "${action.what} Target: ${action.howMuch}. (Educational guidance only.)"
+        }
+
+        if (trace == null) return fallback
+
+        val factsText = trace.triggeringNumbers.joinToString("; ") { "${it.label}: ${it.valueFormatted}" }
+        val prompt = """
+            You are GrowMint Coach. Write 1 to 2 concise, calm, plain-English sentences explaining why this recommended action makes sense for a ${profile.userSituation} (${profile.incomeType.label} income).
+
+            STRICT RULES:
+            - All numbers below were computed by app code. Do NOT invent, recalculate, round differently, or estimate any new figures.
+            - Explain the cause-and-effect in everyday words.
+            - End with "(Educational guidance only.)"
+
+            Code Facts:
+            - Action: ${action.title} (${action.howMuch}, ${action.byWhen})
+            - Rule ID: ${trace.ruleId} (${trace.ruleTitle})
+            - Rule Logic: ${trace.ruleDescription}
+            - Inputs: $factsText
+            - Expected Score Effect: ${trace.expectedScoreExplanation}
+        """.trimIndent()
+
+        return try {
+            val raw = withTimeout(15_000L) {
+                chatModel.generateContent(prompt).text?.trim()
+            }
+            if (!raw.isNullOrBlank()) raw else fallback
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Plain-English action explanation fallback ($e)")
+            fallback
+        }
+    }
 }

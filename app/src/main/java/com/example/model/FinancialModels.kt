@@ -494,7 +494,10 @@ data class MonthlyActionItem(
     val title: String,
     val what: String,
     val howMuch: String,
-    val byWhen: String
+    val byWhen: String,
+    val actionKey: String = "action_$priority",
+    val ruleId: String = "",
+    val traceability: ActionTraceability? = null
 )
 
 data class MonthlyImprovementReport(
@@ -509,7 +512,140 @@ data class MonthlyImprovementReport(
     val whatImproved: List<String>,
     val whatSlipped: List<String>,
     val top3Actions: List<MonthlyActionItem>,
-    val currentSnapshot: MonthlyHealthSnapshot
+    val currentSnapshot: MonthlyHealthSnapshot,
+    val tracedScore: TracedMoneyHealthReport? = null,
+    val dataQualityNotes: List<DataQualityNote> = emptyList()
+)
+
+// === TRACEABILITY, RULE REGISTRY, SCORE HISTORY, VALIDATION & ERROR FLAGS ===
+
+data class RuleDefinition(
+    val id: String,
+    val title: String,
+    val category: String, // "Score Component", "Recommended Action", "Safety Guardrail"
+    val plainDescription: String,
+    val triggerCondition: String
+)
+
+data class ScoreInputMetric(
+    val label: String,
+    val valueFormatted: String,
+    val sourceNote: String = ""
+)
+
+data class DataQualityNote(
+    val id: String,
+    val label: String,
+    val detail: String,
+    val isLowQuality: Boolean
+)
+
+data class ScoreComponentDetail(
+    val id: String, // "buffer", "spending", "savings", "debt"
+    val name: String,
+    val weightPercent: Int,
+    val earnedPoints: Int,
+    val maxPoints: Int,
+    val formulaPlainWords: String,
+    val inputs: List<ScoreInputMetric>,
+    val ruleId: String,
+    val explanation: String
+)
+
+data class TracedMoneyHealthReport(
+    val totalScore: Int,
+    val gradeLabel: String,
+    val calculatedAtMillis: Long,
+    val calculatedAtFormatted: String,
+    val components: List<ScoreComponentDetail>,
+    val dataQualityNotes: List<DataQualityNote>,
+    val triggeredRuleIds: List<String>
+)
+
+enum class ActionTargetDestination(val label: String) {
+    TRANSACTIONS("Open Transactions"),
+    SPLIT("Open Auto-Split"),
+    DEBT_PLANNER("Open Debt Planner"),
+    GOAL_PLANNER("Open Goal Planner"),
+    CALENDAR("Open Deadline Calendar"),
+    NET_WORTH("Open Net Worth")
+}
+
+data class ActionContributorItem(
+    val label: String,
+    val detail: String,
+    val destination: ActionTargetDestination
+)
+
+data class ActionTraceability(
+    val ruleId: String,
+    val ruleTitle: String,
+    val ruleDescription: String,
+    val triggerCondition: String,
+    val triggeringNumbers: List<ScoreInputMetric>,
+    val expectedScoreDelta: Int,
+    val projectedNewScore: Int,
+    val expectedScoreExplanation: String,
+    val dataSources: List<String>,
+    val contributors: List<ActionContributorItem>
+)
+
+data class ScoreHistorySnapshot(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val timestamp: Long = System.currentTimeMillis(),
+    val dateLabel: String,
+    val totalScore: Int,
+    val bufferScore: Int,
+    val spendingScore: Int,
+    val savingsScore: Int,
+    val debtScore: Int,
+    val bufferAmount: Double,
+    val typicalMonthlySpending: Double,
+    val effectiveIncome: Double,
+    val actualSpending: Double,
+    val savingsRatePercent: Double,
+    val totalDebt: Double,
+    val transactionCount: Int,
+    val transactionSpanDays: Int,
+    val triggeredRuleIds: List<String> = emptyList()
+)
+
+data class ComponentDeltaSummary(
+    val componentName: String,
+    val previousPoints: Int,
+    val currentPoints: Int,
+    val delta: Int
+)
+
+data class ScoreSnapshotDiff(
+    val currentSnapshot: ScoreHistorySnapshot,
+    val previousSnapshot: ScoreHistorySnapshot?,
+    val totalDelta: Int,
+    val componentDeltas: List<ComponentDeltaSummary>,
+    val primaryReason: String,
+    val ruleId: String? = null
+)
+
+data class ActivityHistoryEntry(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val timestamp: Long = System.currentTimeMillis(),
+    val category: String, // "Action Completed", "Allocation", "Setting Change", "Check-In", "Plan Update"
+    val title: String,
+    val whatChanged: String,
+    val whySummary: String = "",
+    val numbersSummary: String = "",
+    val ruleId: String? = null
+)
+
+data class ErrorFlagEntry(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val timestamp: Long = System.currentTimeMillis(),
+    val itemType: String, // "MONEY_HEALTH_SCORE", "SCORE_COMPONENT", "TOP_ACTION"
+    val itemId: String,
+    val itemTitle: String,
+    val note: String,
+    val snapshotSummary: String = "",
+    val ruleId: String? = null
 )
 
 // === EFFORTLESS TRANSACTION ENTRY & IMPORT MODELS ===

@@ -707,40 +707,86 @@ object FinancialCalculator {
         }
     }
 
-    // === CHANGE 6: MONTHLY IMPROVEMENT REPORT ===
+    // === TRACEABILITY, DATA QUALITY, SCORE HISTORY DIFFS & MONTHLY IMPROVEMENT REPORT ===
 
-    fun calculateMonthlyImprovementReport(
+    private data class PillarComputationResult(
+        val bufferScore: Int,
+        val spendingScore: Int,
+        val savingsScore: Int,
+        val debtScore: Int,
+        val totalScore: Int,
+        val bufferStatus: BufferGateStatus,
+        val typicalSpending: Double,
+        val effectiveIncome: Double,
+        val actualSpending: Double,
+        val spendRatio: Double,
+        val savingsRate: Double,
+        val surplus: Double,
+        val totalDebt: Double,
+        val highRateDebt: Double,
+        val debtToIncome: Double,
+        val recentTxCount: Int,
+        val recentExpenseTxCount: Int,
+        val recentIncomeTxCount: Int,
+        val transactionSpanDays: Int,
+        val usesSetupSpendingFallback: Boolean,
+        val usesDefaultFloor: Boolean
+    )
+
+    private fun computeFourPillars(
         profile: UserProfile,
         envelopes: List<VirtualEnvelope>,
         transactions: List<LedgerTransaction>,
-        previousSnapshot: MonthlyHealthSnapshot?,
-        nowMillis: Long = System.currentTimeMillis()
-    ): MonthlyImprovementReport {
-        val monthFormat = SimpleDateFormat("yyyy-MM", Locale.US)
-        val currentMonthKey = monthFormat.format(java.util.Date(nowMillis))
-        val nextMonthCal = Calendar.getInstance().apply {
-            timeInMillis = nowMillis
-            add(Calendar.MONTH, 1)
+        nowMillis: Long,
+        extraBufferAmount: Double = 0.0,
+        spendingReductionMonthly: Double = 0.0,
+        debtReductionAmount: Double = 0.0
+    ): PillarComputationResult {
+        val adjustedEnvelopes = if (extraBufferAmount > 0.0) {
+            val hasEmergency = envelopes.any { it.type == EnvelopeType.EMERGENCY_FUND }
+            if (hasEmergency) {
+                envelopes.map {
+                    if (it.type == EnvelopeType.EMERGENCY_FUND) it.copy(balance = it.balance + extraBufferAmount) else it
+                }
+            } else {
+                envelopes + VirtualEnvelope("emergency_fund", EnvelopeType.EMERGENCY_FUND, "Emergency Safety Net", extraBufferAmount)
+            }
+        } else {
+            envelopes
         }
-        val nextMonthLabel = SimpleDateFormat("MMM dd, yyyy", Locale.US).format(nextMonthCal.time)
 
-        val bufferStatus = calculateBufferGateStatus(profile, envelopes)
+        val bufferStatus = calculateBufferGateStatus(profile, adjustedEnvelopes)
         val typicalSpending = bufferStatus.typicalMonthlySpending
+        val usesDefaultFloor = profile.expenses.isEmpty() && profile.debts.isEmpty()
 
         // 1. Buffer progress (0..30)
         val bufferScore = (bufferStatus.progressFraction * 30f).roundToInt().coerceIn(0, 30)
 
         // 2. Spending vs income or limit (0..25)
         val thirtyDaysAgo = nowMillis - (30L * 24L * 60L * 60L * 1000L)
-        val logged30DayExpense = transactions
-            .filter { it.type == "EXPENSE" && it.timestamp >= thirtyDaysAgo }
+        val recentTx = transactions.filter { it.timestamp >= thirtyDaysAgo }
+        val logged30DayExpense = recentTx
+            .filter { it.type == "EXPENSE" }
             .sumOf { it.amount }
-        val logged30DayIncome = transactions
-            .filter { it.type == "INCOME" && it.timestamp >= thirtyDaysAgo }
+        val logged30DayIncome = recentTx
+            .filter { it.type == "INCOME" }
             .sumOf { it.amount }
+        val recentExpenseTxCount = recentTx.count { it.type == "EXPENSE" }
+        val recentIncomeTxCount = recentTx.count { it.type == "INCOME" }
+
+        val spanDays = if (recentTx.isEmpty()) {
+            0
+        } else {
+            val minTs = recentTx.minOf { it.timestamp }
+            val maxTs = max(nowMillis, recentTx.maxOf { it.timestamp })
+            max(1, (((maxTs - minTs) / (24L * 60L * 60L * 1000L)).toInt() + 1).coerceAtMost(30))
+        }
+
+        val usesSetupSpendingFallback = logged30DayExpense <= 0.0
         val effectiveIncome = if (logged30DayIncome > profile.monthlyIncome) logged30DayIncome else profile.monthlyIncome
         val spendingBenchmark = if (effectiveIncome > 0.0) effectiveIncome else typicalSpending
-        val actualSpending = if (logged30DayExpense > 0.0) logged30DayExpense else typicalSpending
+        val baseActualSpending = if (logged30DayExpense > 0.0) logged30DayExpense else typicalSpending
+        val actualSpending = max(0.0, baseActualSpending - spendingReductionMonthly)
         val spendRatio = if (spendingBenchmark > 0.0) actualSpending / spendingBenchmark else 1.5
         val spendingScore = when {
             spendRatio <= 0.70 -> 25
@@ -762,8 +808,10 @@ object FinancialCalculator {
         }
 
         // 4. Debt load (0..20)
-        val totalDebt = profile.debts.sumOf { it.totalAmount }
-        val highRateDebt = profile.debts.filter { it.interestRate >= 15.0 }.sumOf { it.totalAmount }
+        val rawTotalDebt = profile.debts.sumOf { it.totalAmount }
+        val totalDebt = max(0.0, rawTotalDebt - debtReductionAmount)
+        val rawHighRateDebt = profile.debts.filter { it.interestRate >= 15.0 }.sumOf { it.totalAmount }
+        val highRateDebt = max(0.0, rawHighRateDebt - debtReductionAmount)
         val debtToIncome = if (profile.monthlyIncome > 0.0) totalDebt / (profile.monthlyIncome * 12.0) else if (totalDebt > 0) 2.0 else 0.0
         val debtScore = when {
             totalDebt <= 0.0 -> 20
@@ -772,16 +820,404 @@ object FinancialCalculator {
             else -> 5
         }
 
-        val currentScore = (bufferScore + spendingScore + savingsScore + debtScore).coerceIn(0, 100)
-        val prevScore = previousSnapshot?.totalScore
-        val scoreDelta = if (prevScore != null) currentScore - prevScore else 0
+        val totalScore = (bufferScore + spendingScore + savingsScore + debtScore).coerceIn(0, 100)
+        return PillarComputationResult(
+            bufferScore = bufferScore,
+            spendingScore = spendingScore,
+            savingsScore = savingsScore,
+            debtScore = debtScore,
+            totalScore = totalScore,
+            bufferStatus = bufferStatus,
+            typicalSpending = typicalSpending,
+            effectiveIncome = effectiveIncome,
+            actualSpending = actualSpending,
+            spendRatio = spendRatio,
+            savingsRate = savingsRate,
+            surplus = surplus,
+            totalDebt = totalDebt,
+            highRateDebt = highRateDebt,
+            debtToIncome = debtToIncome,
+            recentTxCount = recentTx.size,
+            recentExpenseTxCount = recentExpenseTxCount,
+            recentIncomeTxCount = recentIncomeTxCount,
+            transactionSpanDays = spanDays,
+            usesSetupSpendingFallback = usesSetupSpendingFallback,
+            usesDefaultFloor = usesDefaultFloor
+        )
+    }
 
+    fun assessDataQuality(
+        profile: UserProfile,
+        transactions: List<LedgerTransaction>,
+        nowMillis: Long = System.currentTimeMillis()
+    ): List<DataQualityNote> {
+        val thirtyDaysAgo = nowMillis - (30L * 24L * 60L * 60L * 1000L)
+        val recentTx = transactions.filter { it.timestamp >= thirtyDaysAgo }
+        val spanDays = if (recentTx.isEmpty()) {
+            0
+        } else {
+            val minTs = recentTx.minOf { it.timestamp }
+            val maxTs = max(nowMillis, recentTx.maxOf { it.timestamp })
+            max(1, (((maxTs - minTs) / (24L * 60L * 60L * 1000L)).toInt() + 1).coerceAtMost(30))
+        }
+
+        val notes = mutableListOf<DataQualityNote>()
+
+        when {
+            recentTx.isEmpty() -> notes.add(
+                DataQualityNote(
+                    id = "dq_no_tx",
+                    label = "Based on 0 days of transactions",
+                    detail = "No logged or imported transactions in the last 30 days. Spending & income rely on your setup estimates.",
+                    isLowQuality = true
+                )
+            )
+            spanDays < 14 -> notes.add(
+                DataQualityNote(
+                    id = "dq_short_tx",
+                    label = "Based on $spanDays day${if (spanDays == 1) "" else "s"} of transactions",
+                    detail = "Fewer than 14 days of transactions logged (${recentTx.size} entries). Confidence improves across a full month.",
+                    isLowQuality = true
+                )
+            )
+            else -> notes.add(
+                DataQualityNote(
+                    id = "dq_solid_tx",
+                    label = "Based on $spanDays days of transactions",
+                    detail = "${recentTx.size} transaction(s) recorded inside the 30-day window.",
+                    isLowQuality = false
+                )
+            )
+        }
+
+        if (profile.debts.isEmpty()) {
+            notes.add(
+                DataQualityNote(
+                    id = "dq_no_debt",
+                    label = "No debt entered",
+                    detail = "Debt Load awards 20/20 pts when no debts are entered. Add any loans or cards in Debt Planner if applicable.",
+                    isLowQuality = true
+                )
+            )
+        }
+
+        if (profile.expenses.isEmpty() && recentTx.none { it.type == "EXPENSE" }) {
+            notes.add(
+                DataQualityNote(
+                    id = "dq_setup_estimate",
+                    label = "Using fallback spending estimate",
+                    detail = "No setup expenses or expense transactions entered yet, so safety buffer target uses a default baseline.",
+                    isLowQuality = true
+                )
+            )
+        }
+
+        if (profile.monthlyIncome <= 0.0 && recentTx.none { it.type == "INCOME" }) {
+            notes.add(
+                DataQualityNote(
+                    id = "dq_no_income",
+                    label = "No income recorded",
+                    detail = "Monthly income and 30-day income are both 0; spending ratio uses fallback baseline.",
+                    isLowQuality = true
+                )
+            )
+        }
+
+        return notes
+    }
+
+    fun calculateTracedMoneyHealthScore(
+        profile: UserProfile,
+        envelopes: List<VirtualEnvelope>,
+        transactions: List<LedgerTransaction>,
+        nowMillis: Long = System.currentTimeMillis()
+    ): TracedMoneyHealthReport {
+        val calc = computeFourPillars(profile, envelopes, transactions, nowMillis)
+        val dqNotes = assessDataQuality(profile, transactions, nowMillis)
+        val currency = profile.currencyCode
+        val fmtTime = SimpleDateFormat("MMM dd, yyyy • hh:mm a", Locale.getDefault()).format(java.util.Date(nowMillis))
         val gradeLabel = when {
-            currentScore >= 85 -> "Strong"
-            currentScore >= 70 -> "Healthy"
-            currentScore >= 50 -> "Building"
+            calc.totalScore >= 85 -> "Strong"
+            calc.totalScore >= 70 -> "Healthy"
+            calc.totalScore >= 50 -> "Building"
             else -> "Needs Focus"
         }
+
+        val spendingSourceLabel = if (calc.usesSetupSpendingFallback) {
+            "Setup monthly spending baseline (0 logged expenses)"
+        } else {
+            "30-day ledger expenses (${calc.recentExpenseTxCount} tx)"
+        }
+        val incomeSourceLabel = if (calc.recentIncomeTxCount > 0 && calc.effectiveIncome > profile.monthlyIncome) {
+            "30-day logged income (${calc.recentIncomeTxCount} tx)"
+        } else {
+            "Saved monthly income profile"
+        }
+
+        val components = listOf(
+            ScoreComponentDetail(
+                id = "buffer",
+                name = "Emergency Buffer Progress",
+                weightPercent = 30,
+                earnedPoints = calc.bufferScore,
+                maxPoints = 30,
+                formulaPlainWords = "Round((Emergency Balance / Buffer Target) x 30), capped from 0 to 30 pts.",
+                inputs = listOf(
+                    ScoreInputMetric(
+                        label = "Emergency Safety Net Balance",
+                        valueFormatted = CurrenciesAndCountries.format(calc.bufferStatus.currentEmergencyAmount, currency),
+                        sourceNote = "Emergency Safety Net envelope"
+                    ),
+                    ScoreInputMetric(
+                        label = "Buffer Target (${String.format(Locale.US, "%.1f", calc.bufferStatus.targetMonths)} mo)",
+                        valueFormatted = CurrenciesAndCountries.format(calc.bufferStatus.targetAmount, currency),
+                        sourceNote = if (profile.customBufferTargetAmount != null) "Custom user target" else "Typical spending x target months"
+                    ),
+                    ScoreInputMetric(
+                        label = "Buffer Coverage",
+                        valueFormatted = "${(calc.bufferStatus.progressFraction * 100f).roundToInt()}%",
+                        sourceNote = "Code ratio"
+                    )
+                ),
+                ruleId = RuleRegistry.RULE_BUFFER_PROGRESS,
+                explanation = "${CurrenciesAndCountries.format(calc.bufferStatus.currentEmergencyAmount, currency)} saved vs ${CurrenciesAndCountries.format(calc.bufferStatus.targetAmount, currency)} target (${(calc.bufferStatus.progressFraction * 100).roundToInt()}%)."
+            ),
+            ScoreComponentDetail(
+                id = "spending",
+                name = "Spending vs Income / Limit",
+                weightPercent = 25,
+                earnedPoints = calc.spendingScore,
+                maxPoints = 25,
+                formulaPlainWords = "Spend Ratio = Monthly Spending / Benchmark. <=70%: 25 pts, <=85%: 21 pts, <=100%: 15 pts, <=115%: 8 pts, >115%: 3 pts.",
+                inputs = listOf(
+                    ScoreInputMetric(
+                        label = "Monthly Spending Used",
+                        valueFormatted = CurrenciesAndCountries.format(calc.actualSpending, currency),
+                        sourceNote = spendingSourceLabel
+                    ),
+                    ScoreInputMetric(
+                        label = "Monthly Income / Benchmark",
+                        valueFormatted = CurrenciesAndCountries.format(if (calc.effectiveIncome > 0.0) calc.effectiveIncome else calc.typicalSpending, currency),
+                        sourceNote = incomeSourceLabel
+                    ),
+                    ScoreInputMetric(
+                        label = "Spend-to-Benchmark Ratio",
+                        valueFormatted = "${String.format(Locale.US, "%.0f", calc.spendRatio * 100)}%",
+                        sourceNote = "Code calculation"
+                    )
+                ),
+                ruleId = RuleRegistry.RULE_SPENDING_VS_LIMIT,
+                explanation = "Spending is ${String.format(Locale.US, "%.0f", calc.spendRatio * 100)}% of your monthly benchmark."
+            ),
+            ScoreComponentDetail(
+                id = "savings",
+                name = "Savings Rate",
+                weightPercent = 25,
+                earnedPoints = calc.savingsScore,
+                maxPoints = 25,
+                formulaPlainWords = "Savings Rate = ((Income - Spending) / Income) x 100. >=25%: 25 pts, >=15%: 20 pts, >=8%: 14 pts, >0%: 8 pts, <=0%: 0 pts.",
+                inputs = listOf(
+                    ScoreInputMetric(
+                        label = "Effective Monthly Income",
+                        valueFormatted = CurrenciesAndCountries.format(calc.effectiveIncome, currency),
+                        sourceNote = incomeSourceLabel
+                    ),
+                    ScoreInputMetric(
+                        label = "Monthly Surplus",
+                        valueFormatted = CurrenciesAndCountries.format(calc.surplus, currency),
+                        sourceNote = "Effective income minus spending"
+                    ),
+                    ScoreInputMetric(
+                        label = "Computed Savings Rate",
+                        valueFormatted = "${String.format(Locale.US, "%.1f", calc.savingsRate)}%",
+                        sourceNote = "Code calculation"
+                    )
+                ),
+                ruleId = RuleRegistry.RULE_SAVINGS_RATE,
+                explanation = "Keeping ${String.format(Locale.US, "%.1f", calc.savingsRate)}% of monthly income unspent."
+            ),
+            ScoreComponentDetail(
+                id = "debt",
+                name = "Debt Load",
+                weightPercent = 20,
+                earnedPoints = calc.debtScore,
+                maxPoints = 20,
+                formulaPlainWords = "0 debt: 20 pts; No >=15% APR & debt <=25% annual income: 16 pts; High-APR <=1 mo income & debt <=50% annual income: 11 pts; else 5 pts.",
+                inputs = listOf(
+                    ScoreInputMetric(
+                        label = "Total Debt Balance",
+                        valueFormatted = CurrenciesAndCountries.format(calc.totalDebt, currency),
+                        sourceNote = if (profile.debts.isEmpty()) "No debts entered in Debt Planner" else "${profile.debts.size} debt item(s)"
+                    ),
+                    ScoreInputMetric(
+                        label = "High-Interest Debt (>= 15% APR)",
+                        valueFormatted = CurrenciesAndCountries.format(calc.highRateDebt, currency),
+                        sourceNote = "Debt Planner APR filter"
+                    ),
+                    ScoreInputMetric(
+                        label = "Debt-to-Annual-Income",
+                        valueFormatted = "${String.format(Locale.US, "%.1f", calc.debtToIncome * 100)}%",
+                        sourceNote = "Total debt / (monthly income x 12)"
+                    )
+                ),
+                ruleId = RuleRegistry.RULE_DEBT_LOAD,
+                explanation = if (calc.totalDebt <= 0.0) "Debt-free balance sheet (no debts recorded)." else "Total debt ${CurrenciesAndCountries.format(calc.totalDebt, currency)} (High-APR: ${CurrenciesAndCountries.format(calc.highRateDebt, currency)})."
+            )
+        )
+
+        val triggeredRules = buildList {
+            add(RuleRegistry.RULE_BUFFER_PROGRESS)
+            add(RuleRegistry.RULE_SPENDING_VS_LIMIT)
+            add(RuleRegistry.RULE_SAVINGS_RATE)
+            add(RuleRegistry.RULE_DEBT_LOAD)
+            if (profile.isUnder18) add(RuleRegistry.RULE_GUIDED_UNDER18)
+            if (!calc.bufferStatus.isBufferMet) add(RuleRegistry.RULE_BUFFER_FIRST)
+        }
+
+        return TracedMoneyHealthReport(
+            totalScore = calc.totalScore,
+            gradeLabel = gradeLabel,
+            calculatedAtMillis = nowMillis,
+            calculatedAtFormatted = fmtTime,
+            components = components,
+            dataQualityNotes = dqNotes,
+            triggeredRuleIds = triggeredRules
+        )
+    }
+
+    fun buildScoreHistorySnapshot(
+        profile: UserProfile,
+        envelopes: List<VirtualEnvelope>,
+        transactions: List<LedgerTransaction>,
+        nowMillis: Long = System.currentTimeMillis()
+    ): ScoreHistorySnapshot {
+        val calc = computeFourPillars(profile, envelopes, transactions, nowMillis)
+        val dateLabel = SimpleDateFormat("MMM dd, HH:mm", Locale.US).format(java.util.Date(nowMillis))
+        val rules = buildList {
+            add(RuleRegistry.RULE_BUFFER_PROGRESS)
+            add(RuleRegistry.RULE_SPENDING_VS_LIMIT)
+            add(RuleRegistry.RULE_SAVINGS_RATE)
+            add(RuleRegistry.RULE_DEBT_LOAD)
+            if (!calc.bufferStatus.isBufferMet) add(RuleRegistry.RULE_BUFFER_FIRST)
+            if (calc.totalDebt > 0.0 && !profile.isUnder18) add(RuleRegistry.RULE_HIGH_APR_DEBT)
+        }
+        return ScoreHistorySnapshot(
+            timestamp = nowMillis,
+            dateLabel = dateLabel,
+            totalScore = calc.totalScore,
+            bufferScore = calc.bufferScore,
+            spendingScore = calc.spendingScore,
+            savingsScore = calc.savingsScore,
+            debtScore = calc.debtScore,
+            bufferAmount = calc.bufferStatus.currentEmergencyAmount,
+            typicalMonthlySpending = calc.typicalSpending,
+            effectiveIncome = calc.effectiveIncome,
+            actualSpending = calc.actualSpending,
+            savingsRatePercent = calc.savingsRate,
+            totalDebt = calc.totalDebt,
+            transactionCount = calc.recentTxCount,
+            transactionSpanDays = calc.transactionSpanDays,
+            triggeredRuleIds = rules
+        )
+    }
+
+    fun calculateScoreSnapshotDiff(
+        current: ScoreHistorySnapshot,
+        previous: ScoreHistorySnapshot?,
+        currencyCode: String
+    ): ScoreSnapshotDiff {
+        if (previous == null) {
+            return ScoreSnapshotDiff(
+                currentSnapshot = current,
+                previousSnapshot = null,
+                totalDelta = 0,
+                componentDeltas = listOf(
+                    ComponentDeltaSummary("Emergency Buffer", current.bufferScore, current.bufferScore, 0),
+                    ComponentDeltaSummary("Spending vs Income", current.spendingScore, current.spendingScore, 0),
+                    ComponentDeltaSummary("Savings Rate", current.savingsScore, current.savingsScore, 0),
+                    ComponentDeltaSummary("Debt Load", current.debtScore, current.debtScore, 0)
+                ),
+                primaryReason = "Initial baseline recorded at ${current.totalScore}/100 (${current.transactionCount} recent transactions).",
+                ruleId = current.triggeredRuleIds.firstOrNull()
+            )
+        }
+
+        val deltas = listOf(
+            ComponentDeltaSummary("Emergency Buffer", previous.bufferScore, current.bufferScore, current.bufferScore - previous.bufferScore),
+            ComponentDeltaSummary("Spending vs Income", previous.spendingScore, current.spendingScore, current.spendingScore - previous.spendingScore),
+            ComponentDeltaSummary("Savings Rate", previous.savingsScore, current.savingsScore, current.savingsScore - previous.savingsScore),
+            ComponentDeltaSummary("Debt Load", previous.debtScore, current.debtScore, current.debtScore - previous.debtScore)
+        )
+        val totalDelta = current.totalScore - previous.totalScore
+        val biggestShift = deltas.maxByOrNull { kotlin.math.abs(it.delta) }
+
+        val (reason, ruleId) = when {
+            biggestShift == null || totalDelta == 0 && deltas.all { it.delta == 0 } -> {
+                "Score held steady at ${current.totalScore}/100 with unchanged component weights." to RuleRegistry.RULE_CHECKIN_SNAPSHOT
+            }
+            biggestShift.componentName == "Emergency Buffer" && biggestShift.delta != 0 -> {
+                val verb = if (biggestShift.delta > 0) "grew" else "dropped"
+                "Main driver: Emergency buffer $verb from ${CurrenciesAndCountries.format(previous.bufferAmount, currencyCode)} to ${CurrenciesAndCountries.format(current.bufferAmount, currencyCode)} (${if (biggestShift.delta > 0) "+" else ""}${biggestShift.delta} pts)." to RuleRegistry.RULE_BUFFER_PROGRESS
+            }
+            biggestShift.componentName == "Spending vs Income" && biggestShift.delta != 0 -> {
+                val verb = if (biggestShift.delta > 0) "improved" else "rose"
+                "Main driver: Monthly spending $verb from ${CurrenciesAndCountries.format(previous.actualSpending, currencyCode)} to ${CurrenciesAndCountries.format(current.actualSpending, currencyCode)} (${if (biggestShift.delta > 0) "+" else ""}${biggestShift.delta} pts)." to RuleRegistry.RULE_SPENDING_VS_LIMIT
+            }
+            biggestShift.componentName == "Savings Rate" && biggestShift.delta != 0 -> {
+                "Main driver: Savings rate moved from ${String.format(Locale.US, "%.1f", previous.savingsRatePercent)}% to ${String.format(Locale.US, "%.1f", current.savingsRatePercent)}% (${if (biggestShift.delta > 0) "+" else ""}${biggestShift.delta} pts)." to RuleRegistry.RULE_SAVINGS_RATE
+            }
+            biggestShift.componentName == "Debt Load" && biggestShift.delta != 0 -> {
+                "Main driver: Total debt changed from ${CurrenciesAndCountries.format(previous.totalDebt, currencyCode)} to ${CurrenciesAndCountries.format(current.totalDebt, currencyCode)} (${if (biggestShift.delta > 0) "+" else ""}${biggestShift.delta} pts)." to RuleRegistry.RULE_DEBT_LOAD
+            }
+            else -> {
+                "Score shifted by ${if (totalDelta > 0) "+" else ""}$totalDelta pts across your updated financial inputs." to RuleRegistry.RULE_CHECKIN_SNAPSHOT
+            }
+        }
+
+        return ScoreSnapshotDiff(
+            currentSnapshot = current,
+            previousSnapshot = previous,
+            totalDelta = totalDelta,
+            componentDeltas = deltas,
+            primaryReason = reason,
+            ruleId = ruleId
+        )
+    }
+
+    fun calculateMonthlyImprovementReport(
+        profile: UserProfile,
+        envelopes: List<VirtualEnvelope>,
+        transactions: List<LedgerTransaction>,
+        previousSnapshot: MonthlyHealthSnapshot?,
+        nowMillis: Long = System.currentTimeMillis(),
+        calendarItems: List<CalendarReminderItem> = emptyList()
+    ): MonthlyImprovementReport {
+        val monthFormat = SimpleDateFormat("yyyy-MM", Locale.US)
+        val currentMonthKey = monthFormat.format(java.util.Date(nowMillis))
+        val nextMonthCal = Calendar.getInstance().apply {
+            timeInMillis = nowMillis
+            add(Calendar.MONTH, 1)
+        }
+        val nextMonthLabel = SimpleDateFormat("MMM dd, yyyy", Locale.US).format(nextMonthCal.time)
+
+        val calc = computeFourPillars(profile, envelopes, transactions, nowMillis)
+        val tracedScore = calculateTracedMoneyHealthScore(profile, envelopes, transactions, nowMillis)
+        val bufferStatus = calc.bufferStatus
+        val typicalSpending = calc.typicalSpending
+        val bufferScore = calc.bufferScore
+        val spendingScore = calc.spendingScore
+        val savingsScore = calc.savingsScore
+        val debtScore = calc.debtScore
+        val spendRatio = calc.spendRatio
+        val savingsRate = calc.savingsRate
+        val surplus = calc.surplus
+        val totalDebt = calc.totalDebt
+        val highRateDebt = calc.highRateDebt
+        val currentScore = calc.totalScore
+
+        val prevScore = previousSnapshot?.totalScore
+        val scoreDelta = if (prevScore != null) currentScore - prevScore else 0
+        val gradeLabel = tracedScore.gradeLabel
 
         val currentSnapshot = MonthlyHealthSnapshot(
             monthKey = currentMonthKey,
@@ -839,28 +1275,142 @@ object FinancialCalculator {
             whatSlipped.add("No major setbacks recorded compared to last month!")
         }
 
-        // Top 3 Specific Actions for Next Month (what, how much, by when)
+        val thirtyDaysAgo = nowMillis - (30L * 24L * 60L * 60L * 1000L)
+        val topExpenseTransactions = transactions
+            .filter { it.type == "EXPENSE" && it.timestamp >= thirtyDaysAgo }
+            .sortedByDescending { it.amount }
+            .take(3)
+        val currency = profile.currencyCode
+
+        // Top 3 Specific Actions with full traceability
         val actions = mutableListOf<MonthlyActionItem>()
         if (!bufferStatus.isBufferMet) {
             val stepAmt = min(bufferStatus.remainingToTarget, max(25.0, bufferStatus.targetAmount * 0.25))
+            val simulated = computeFourPillars(profile, envelopes, transactions, nowMillis, extraBufferAmount = stepAmt)
+            val delta = simulated.totalScore - currentScore
+            val rule = RuleRegistry.findById(RuleRegistry.RULE_BUFFER_FIRST)!!
+            val contributors = buildList {
+                add(
+                    ActionContributorItem(
+                        label = "Emergency Safety Net envelope",
+                        detail = "Currently ${CurrenciesAndCountries.format(bufferStatus.currentEmergencyAmount, currency)} of ${CurrenciesAndCountries.format(bufferStatus.targetAmount, currency)} target",
+                        destination = ActionTargetDestination.SPLIT
+                    )
+                )
+                profile.expenses.sortedByDescending { it.amount }.take(2).forEach { exp ->
+                    add(
+                        ActionContributorItem(
+                            label = "Setup expense: ${exp.category}",
+                            detail = "${CurrenciesAndCountries.format(exp.amount, currency)}/mo sets your buffer target",
+                            destination = ActionTargetDestination.TRANSACTIONS
+                        )
+                    )
+                }
+                topExpenseTransactions.take(2).forEach { tx ->
+                    add(
+                        ActionContributorItem(
+                            label = tx.merchant.ifBlank { tx.notes }.ifBlank { tx.category },
+                            detail = "${CurrenciesAndCountries.format(tx.amount, currency)} (${tx.category})",
+                            destination = ActionTargetDestination.TRANSACTIONS
+                        )
+                    )
+                }
+            }
             actions.add(
                 MonthlyActionItem(
                     priority = 1,
                     title = "Boost Emergency Safety Net",
                     what = "Move extra surplus into your Emergency Safety Net envelope before investing.",
-                    howMuch = CurrenciesAndCountries.format(stepAmt, profile.currencyCode),
-                    byWhen = "By $nextMonthLabel"
+                    howMuch = CurrenciesAndCountries.format(stepAmt, currency),
+                    byWhen = "By $nextMonthLabel",
+                    actionKey = "${currentMonthKey}_p1_${RuleRegistry.RULE_BUFFER_FIRST}",
+                    ruleId = rule.id,
+                    traceability = ActionTraceability(
+                        ruleId = rule.id,
+                        ruleTitle = rule.title,
+                        ruleDescription = rule.plainDescription,
+                        triggerCondition = rule.triggerCondition,
+                        triggeringNumbers = listOf(
+                            ScoreInputMetric("Emergency Buffer Saved", CurrenciesAndCountries.format(bufferStatus.currentEmergencyAmount, currency)),
+                            ScoreInputMetric("1-Month Buffer Target", CurrenciesAndCountries.format(bufferStatus.targetAmount, currency)),
+                            ScoreInputMetric("Remaining Gap", CurrenciesAndCountries.format(bufferStatus.remainingToTarget, currency)),
+                            ScoreInputMetric("Suggested Step (25% of target)", CurrenciesAndCountries.format(stepAmt, currency))
+                        ),
+                        expectedScoreDelta = delta,
+                        projectedNewScore = simulated.totalScore,
+                        expectedScoreExplanation = if (delta > 0) {
+                            "Adding ${CurrenciesAndCountries.format(stepAmt, currency)} to Emergency Safety Net lifts your score +$delta pts ($currentScore -> ${simulated.totalScore}/100)."
+                        } else {
+                            "Moves buffer coverage closer to 100% and keeps score steady at $currentScore/100."
+                        },
+                        dataSources = listOf(
+                            "Virtual Envelope: Emergency Safety Net",
+                            if (calc.usesSetupSpendingFallback) "Setup expense baseline" else "30-day logged expenses (${calc.recentExpenseTxCount} tx)"
+                        ),
+                        contributors = contributors
+                    )
                 )
             )
         } else {
             val goalAmt = max(25.0, surplus * 0.4)
+            val rule = RuleRegistry.findById(RuleRegistry.RULE_TOP_GOAL_FUNDING)!!
+            val primaryGoal = profile.goals.firstOrNull()
+            val contributors = buildList {
+                if (primaryGoal != null) {
+                    add(
+                        ActionContributorItem(
+                            label = "Goal: ${primaryGoal.name}",
+                            detail = "${CurrenciesAndCountries.format(primaryGoal.currentAmount, currency)} / ${CurrenciesAndCountries.format(primaryGoal.targetAmount, currency)} (${primaryGoal.targetDate})",
+                            destination = ActionTargetDestination.GOAL_PLANNER
+                        )
+                    )
+                } else {
+                    add(
+                        ActionContributorItem(
+                            label = "Create a target in Goal Planner",
+                            detail = "Monthly surplus available: ${CurrenciesAndCountries.format(max(0.0, surplus), currency)}",
+                            destination = ActionTargetDestination.GOAL_PLANNER
+                        )
+                    )
+                }
+                add(
+                    ActionContributorItem(
+                        label = "Route payday split in Auto-Split",
+                        detail = "Direct ${CurrenciesAndCountries.format(goalAmt, currency)}/mo into savings envelopes",
+                        destination = ActionTargetDestination.SPLIT
+                    )
+                )
+            }
             actions.add(
                 MonthlyActionItem(
                     priority = 1,
                     title = "Fund Top Savings Goal",
                     what = "Allocate steady monthly contribution toward your highest-priority Goal Planner target.",
-                    howMuch = CurrenciesAndCountries.format(goalAmt, profile.currencyCode),
-                    byWhen = "By $nextMonthLabel"
+                    howMuch = CurrenciesAndCountries.format(goalAmt, currency),
+                    byWhen = "By $nextMonthLabel",
+                    actionKey = "${currentMonthKey}_p1_${RuleRegistry.RULE_TOP_GOAL_FUNDING}",
+                    ruleId = rule.id,
+                    traceability = ActionTraceability(
+                        ruleId = rule.id,
+                        ruleTitle = rule.title,
+                        ruleDescription = rule.plainDescription,
+                        triggerCondition = rule.triggerCondition,
+                        triggeringNumbers = listOf(
+                            ScoreInputMetric("Buffer Coverage", "100% funded"),
+                            ScoreInputMetric("Monthly Surplus", CurrenciesAndCountries.format(surplus, currency)),
+                            ScoreInputMetric("40% Goal Allocation", CurrenciesAndCountries.format(goalAmt, currency)),
+                            ScoreInputMetric("Active Goals", "${profile.goals.size}")
+                        ),
+                        expectedScoreDelta = 0,
+                        projectedNewScore = currentScore,
+                        expectedScoreExplanation = "Keeps your 30/30 Emergency Buffer intact while advancing your Goal Planner timeline without lowering liquidity.",
+                        dataSources = listOf(
+                            "Virtual Envelopes (Safety Net met)",
+                            "Goal Planner (${profile.goals.size} goal(s))",
+                            "Monthly Cashflow Surplus"
+                        ),
+                        contributors = contributors
+                    )
                 )
             )
         }
@@ -868,36 +1418,170 @@ object FinancialCalculator {
         if (totalDebt > 0.0 && !profile.isUnder18) {
             val topDebt = profile.debts.maxByOrNull { it.interestRate }
             val extraDebtAmt = max(20.0, (topDebt?.minimumPayment ?: 25.0) * 0.5)
+            val simulated = computeFourPillars(profile, envelopes, transactions, nowMillis, debtReductionAmount = extraDebtAmt)
+            val delta = simulated.totalScore - currentScore
+            val rule = RuleRegistry.findById(RuleRegistry.RULE_HIGH_APR_DEBT)!!
+            val contributors = profile.debts.sortedByDescending { it.interestRate }.take(3).map { d ->
+                ActionContributorItem(
+                    label = d.name,
+                    detail = "${CurrenciesAndCountries.format(d.totalAmount, currency)} @ ${String.format(Locale.US, "%.1f", d.interestRate)}% APR",
+                    destination = ActionTargetDestination.DEBT_PLANNER
+                )
+            }
             actions.add(
                 MonthlyActionItem(
                     priority = 2,
                     title = "Extra Debt Principal Payment",
                     what = "Add an extra payment toward ${topDebt?.name ?: "your highest-APR debt"} using Avalanche/Snowball.",
-                    howMuch = CurrenciesAndCountries.format(extraDebtAmt, profile.currencyCode),
-                    byWhen = "By $nextMonthLabel"
+                    howMuch = CurrenciesAndCountries.format(extraDebtAmt, currency),
+                    byWhen = "By $nextMonthLabel",
+                    actionKey = "${currentMonthKey}_p2_${RuleRegistry.RULE_HIGH_APR_DEBT}",
+                    ruleId = rule.id,
+                    traceability = ActionTraceability(
+                        ruleId = rule.id,
+                        ruleTitle = rule.title,
+                        ruleDescription = rule.plainDescription,
+                        triggerCondition = rule.triggerCondition,
+                        triggeringNumbers = listOf(
+                            ScoreInputMetric("Total Debt", CurrenciesAndCountries.format(totalDebt, currency)),
+                            ScoreInputMetric("Highest APR Debt", "${topDebt?.name ?: "Debt"} (${String.format(Locale.US, "%.1f", topDebt?.interestRate ?: 0.0)}%)"),
+                            ScoreInputMetric("High-APR Balance (>=15%)", CurrenciesAndCountries.format(highRateDebt, currency)),
+                            ScoreInputMetric("Suggested Extra Principal", CurrenciesAndCountries.format(extraDebtAmt, currency))
+                        ),
+                        expectedScoreDelta = delta,
+                        projectedNewScore = simulated.totalScore,
+                        expectedScoreExplanation = if (delta > 0) {
+                            "Paying ${CurrenciesAndCountries.format(extraDebtAmt, currency)} toward principal lowers your debt ratio and raises your score +$delta pts ($currentScore -> ${simulated.totalScore}/100)."
+                        } else {
+                            "Cuts interest charges on ${topDebt?.name ?: "debt"} and accelerates your Debt Load score milestone ($currentScore/100)."
+                        },
+                        dataSources = listOf("Debt Payoff Planner (${profile.debts.size} debt(s))", "Monthly income profile"),
+                        contributors = contributors
+                    )
                 )
             )
         } else {
             val trimAmt = max(15.0, typicalSpending * 0.05)
+            val simulated = computeFourPillars(profile, envelopes, transactions, nowMillis, spendingReductionMonthly = trimAmt)
+            val delta = simulated.totalScore - currentScore
+            val rule = RuleRegistry.findById(RuleRegistry.RULE_TRIM_SPENDING)!!
+            val contributors = buildList {
+                topExpenseTransactions.forEach { tx ->
+                    add(
+                        ActionContributorItem(
+                            label = tx.merchant.ifBlank { tx.notes }.ifBlank { tx.category },
+                            detail = "${CurrenciesAndCountries.format(tx.amount, currency)} • ${tx.category}",
+                            destination = ActionTargetDestination.TRANSACTIONS
+                        )
+                    )
+                }
+                if (isEmpty()) {
+                    profile.expenses.sortedByDescending { it.amount }.take(3).forEach { exp ->
+                        add(
+                            ActionContributorItem(
+                                label = exp.category,
+                                detail = "${CurrenciesAndCountries.format(exp.amount, currency)}/mo baseline",
+                                destination = ActionTargetDestination.TRANSACTIONS
+                            )
+                        )
+                    }
+                }
+            }
             actions.add(
                 MonthlyActionItem(
                     priority = 2,
                     title = "Trim Non-Essential Spending",
                     what = "Review subscriptions & impulse buys to free up monthly cashflow.",
-                    howMuch = "Save ${CurrenciesAndCountries.format(trimAmt, profile.currencyCode)}/mo",
-                    byWhen = "Within 14 days"
+                    howMuch = "Save ${CurrenciesAndCountries.format(trimAmt, currency)}/mo",
+                    byWhen = "Within 14 days",
+                    actionKey = "${currentMonthKey}_p2_${RuleRegistry.RULE_TRIM_SPENDING}",
+                    ruleId = rule.id,
+                    traceability = ActionTraceability(
+                        ruleId = rule.id,
+                        ruleTitle = rule.title,
+                        ruleDescription = rule.plainDescription,
+                        triggerCondition = rule.triggerCondition,
+                        triggeringNumbers = listOf(
+                            ScoreInputMetric("Typical Monthly Spending", CurrenciesAndCountries.format(typicalSpending, currency)),
+                            ScoreInputMetric("5% Trim Target", CurrenciesAndCountries.format(trimAmt, currency)),
+                            ScoreInputMetric("Current Savings Rate", "${String.format(Locale.US, "%.1f", savingsRate)}%")
+                        ),
+                        expectedScoreDelta = delta,
+                        projectedNewScore = simulated.totalScore,
+                        expectedScoreExplanation = if (delta > 0) {
+                            "Trimming ${CurrenciesAndCountries.format(trimAmt, currency)}/mo raises your savings/spending efficiency by +$delta pts ($currentScore -> ${simulated.totalScore}/100)."
+                        } else {
+                            "Frees ${CurrenciesAndCountries.format(trimAmt, currency)}/mo toward your buffer and protects your Spending & Savings scores ($currentScore/100)."
+                        },
+                        dataSources = listOf(
+                            if (calc.usesSetupSpendingFallback) "Setup expense categories" else "30-day logged/imported transactions (${calc.recentExpenseTxCount} tx)",
+                            "Recurring subscription scan"
+                        ),
+                        contributors = contributors
+                    )
                 )
             )
         }
 
         val checkInGoalAmt = max(10.0, typicalSpending * 0.03)
+        val checkInRule = RuleRegistry.findById(RuleRegistry.RULE_CHECKIN_SNAPSHOT)!!
+        val upcoming30 = getUpcomingDeadlines(calendarItems, nowMillis = nowMillis, horizonDays = 30)
+        val checkInContributors = buildList {
+            upcoming30.take(2).forEach { up ->
+                add(
+                    ActionContributorItem(
+                        label = "Upcoming: ${up.item.title}",
+                        detail = "${CurrenciesAndCountries.format(up.item.amount, currency)} due in ${up.daysUntilDue} day(s)",
+                        destination = ActionTargetDestination.CALENDAR
+                    )
+                )
+            }
+            add(
+                ActionContributorItem(
+                    label = "Net Worth & Monthly Trend",
+                    detail = "Save this month's assets vs debts snapshot",
+                    destination = ActionTargetDestination.NET_WORTH
+                )
+            )
+            if (upcoming30.isEmpty()) {
+                add(
+                    ActionContributorItem(
+                        label = "Deadline & Renewal Calendar",
+                        detail = "No unpaid renewals logged in next 30 days",
+                        destination = ActionTargetDestination.CALENDAR
+                    )
+                )
+            }
+        }
         actions.add(
             MonthlyActionItem(
                 priority = 3,
                 title = "Run Next Month's Check-In & Snapshot",
                 what = "Save a Net Worth snapshot and verify upcoming 30-day calendar renewals.",
-                howMuch = "Protect ${CurrenciesAndCountries.format(checkInGoalAmt, profile.currencyCode)} from surprise bills",
-                byWhen = "By $nextMonthLabel"
+                howMuch = "Protect ${CurrenciesAndCountries.format(checkInGoalAmt, currency)} from surprise bills",
+                byWhen = "By $nextMonthLabel",
+                actionKey = "${currentMonthKey}_p3_${RuleRegistry.RULE_CHECKIN_SNAPSHOT}",
+                ruleId = checkInRule.id,
+                traceability = ActionTraceability(
+                    ruleId = checkInRule.id,
+                    ruleTitle = checkInRule.title,
+                    ruleDescription = checkInRule.plainDescription,
+                    triggerCondition = checkInRule.triggerCondition,
+                    triggeringNumbers = listOf(
+                        ScoreInputMetric("Monthly Spending Baseline", CurrenciesAndCountries.format(typicalSpending, currency)),
+                        ScoreInputMetric("3% Surprise-Bill Reserve", CurrenciesAndCountries.format(checkInGoalAmt, currency)),
+                        ScoreInputMetric("Upcoming 30-Day Renewals", "${upcoming30.size} item(s)")
+                    ),
+                    expectedScoreDelta = 0,
+                    projectedNewScore = currentScore,
+                    expectedScoreExplanation = "Keeps your score history and upcoming deadline cashflow up to date so trends stay accurate next month.",
+                    dataSources = listOf(
+                        "Monthly Score History snapshots",
+                        "Deadline & Renewal Calendar",
+                        "Net Worth assets & debts"
+                    ),
+                    contributors = checkInContributors
+                )
             )
         )
 
@@ -928,8 +1612,11 @@ object FinancialCalculator {
             whatImproved = whatImproved,
             whatSlipped = whatSlipped,
             top3Actions = actions.take(3),
-            currentSnapshot = currentSnapshot
+            currentSnapshot = currentSnapshot,
+            tracedScore = tracedScore,
+            dataQualityNotes = tracedScore.dataQualityNotes
         )
     }
 }
+
 

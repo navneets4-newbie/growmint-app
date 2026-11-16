@@ -57,6 +57,10 @@ fun SettingsScreen(
     merchantRules: List<MerchantCategoryRule> = emptyList(),
     onSaveMerchantRule: (merchantPattern: String, category: String, ruleId: String?) -> Unit = { _, _, _ -> },
     onDeleteMerchantRule: (String) -> Unit = {},
+    onOpenHowDecides: () -> Unit = {},
+    onOpenActivityHistory: () -> Unit = {},
+    activityCount: Int = 0,
+    errorFlagCount: Int = 0,
     modifier: Modifier = Modifier
 ) {
     var showCurrencyDialog by remember { mutableStateOf(false) }
@@ -211,6 +215,87 @@ fun SettingsScreen(
                                     modifier = Modifier.weight(1f)
                                 )
                             }
+                        }
+                    }
+                }
+            }
+
+            // Section 0.25: Transparency & Activity History
+            item {
+                Text(
+                    text = "Transparency & Activity",
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(onClick = onOpenHowDecides)
+                            .testTag("settings_how_decides_card"),
+                        colors = CardDefaults.cardColors(containerColor = MintPrimary.copy(alpha = 0.12f)),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                Icon(Icons.Default.Rule, contentDescription = null, tint = MintPrimary)
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Column {
+                                    Text(
+                                        text = "How Grow Mint decides",
+                                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
+                                    )
+                                    Text(
+                                        text = "See every rule ID, plain-language formula & trigger condition",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                            Icon(Icons.Default.ChevronRight, contentDescription = "Open How Grow Mint decides", tint = MintPrimary)
+                        }
+                    }
+
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(onClick = onOpenActivityHistory)
+                            .testTag("settings_activity_history_card"),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                Icon(Icons.Default.History, contentDescription = null, tint = MintPrimary)
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Column {
+                                    Text(
+                                        text = "Activity History & Error Flags",
+                                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
+                                    )
+                                    Text(
+                                        text = "$activityCount confirmed change(s) • $errorFlagCount flagged • Export CSV or Text",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                            Icon(Icons.Default.ChevronRight, contentDescription = "Open Activity History", tint = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
                 }
@@ -1462,6 +1547,7 @@ fun SettingsScreen(
             summaryLines = change.summaryLines,
             confirmLabel = change.confirmLabel,
             isDestructive = change.isDestructive,
+            activityCategory = "Setting Change",
             onConfirm = {
                 change.onApply()
                 pendingChange = null
