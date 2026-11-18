@@ -25,6 +25,7 @@ import com.example.model.DefaultTransactionCategories
 import com.example.model.IncomeType
 import com.example.model.LifeStage
 import com.example.model.MerchantCategoryRule
+import com.example.model.ReferralState
 import com.example.model.UserProfile
 import com.example.ui.components.ConfirmActionDialog
 import com.example.ui.components.PersistentDisclaimerBanner
@@ -61,6 +62,9 @@ fun SettingsScreen(
     onOpenActivityHistory: () -> Unit = {},
     activityCount: Int = 0,
     errorFlagCount: Int = 0,
+    referralState: ReferralState = ReferralState(),
+    onToggleSharingEnabled: (Boolean) -> Unit = {},
+    onDeleteReferralCodeAndCount: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var showCurrencyDialog by remember { mutableStateOf(false) }
@@ -356,6 +360,136 @@ fun SettingsScreen(
                             },
                             modifier = Modifier.testTag("local_only_mode_switch")
                         )
+                    }
+                }
+            }
+
+            // Section 0.52: Sharing and referrals
+            item {
+                Text(
+                    text = "Sharing and referrals",
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+
+            item {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("settings_sharing_referrals_card"),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Turn sharing and referrals on",
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
+                                )
+                                Text(
+                                    text = if (referralState.sharingEnabled) {
+                                        "ON: You can generate privacy-safe score cards and share anonymous referral links."
+                                    } else {
+                                        "OFF: All score-card sharing, referral links, and invite options are hidden."
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = referralState.sharingEnabled,
+                                onCheckedChange = { nextVal ->
+                                    pendingChange = PendingSettingsChange(
+                                        title = if (nextVal) "Turn Sharing On?" else "Turn All Sharing Off?",
+                                        summaryLines = listOf(
+                                            if (nextVal) {
+                                                "Enables privacy-safe score card generation and anonymous invite links (Guided Mode <18 remains protected)."
+                                            } else {
+                                                "Hides all score-card sharing and referral invite controls across GrowMint."
+                                            }
+                                        ),
+                                        onApply = {
+                                            onToggleSharingEnabled(nextVal)
+                                            snackbarMessage = if (nextVal) "Sharing turned on." else "All sharing turned off."
+                                        }
+                                    )
+                                },
+                                modifier = Modifier.testTag("settings_sharing_enabled_switch")
+                            )
+                        }
+
+                        HorizontalDivider()
+
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(
+                                text = "Anonymous Referral Record",
+                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
+                            )
+                            Text(
+                                text = if (referralState.myReferralCode.isNullOrBlank()) {
+                                    "Your referral code and count are deleted (0 stored)."
+                                } else {
+                                    "Current code: ${referralState.myReferralCode} • Friends who joined: ${referralState.referralCount}"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            OutlinedButton(
+                                onClick = {
+                                    pendingChange = PendingSettingsChange(
+                                        title = "Delete Referral Code and Count?",
+                                        summaryLines = listOf(
+                                            "Removes your anonymous referral code and resets your referral count to 0.",
+                                            "Existing referral links using your old code will no longer count."
+                                        ),
+                                        confirmLabel = "Delete Code & Count",
+                                        isDestructive = true,
+                                        onApply = {
+                                            onDeleteReferralCodeAndCount()
+                                            snackbarMessage = "Deleted your referral code and count."
+                                        }
+                                    )
+                                },
+                                enabled = !referralState.myReferralCode.isNullOrBlank() || referralState.referralCount > 0,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 48.dp)
+                                    .testTag("settings_delete_referral_btn")
+                            ) {
+                                Icon(Icons.Default.DeleteOutline, contentDescription = null, tint = FinanceRed, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Delete my referral code and count", color = FinanceRed, fontWeight = FontWeight.SemiBold)
+                            }
+                        }
+
+                        HorizontalDivider()
+
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(
+                                text = "What your score card and link contain",
+                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                color = MintPrimary
+                            )
+                            Text(
+                                text = "• Included: Only your Money Health Score (0–100), score label, optional monthly point change, optional Low/Okay/Good component levels, optional nickname, and a random referral code.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                text = "• Never included: Balances, income, debts, net worth, transactions, goals, account names, real name, email, currency amounts, or details about friends who join.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
                 }
             }

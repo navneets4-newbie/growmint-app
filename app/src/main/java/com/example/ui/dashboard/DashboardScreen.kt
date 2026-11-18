@@ -20,17 +20,18 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.ToolSubScreen
 import com.example.data.FinancialCalculator
 import com.example.model.*
 import com.example.ui.components.ConfirmActionDialog
-import com.example.ui.components.DataQualityBadgeRow
 import com.example.ui.components.FormattedAmountDisplay
 import com.example.ui.components.HealthScorePill
 import com.example.ui.components.PersistentDisclaimerBanner
 import com.example.ui.components.SafetyBufferGateCard
+import com.example.ui.components.TopLevelDataQualityWarning
 import com.example.ui.theme.*
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -76,6 +77,10 @@ fun DashboardScreen(
     onUndoLastImport: () -> Unit = {},
     onLaunchSplitForIncome: (Double, String) -> Unit = { _, _ -> },
     onDismissIncomePrompt: () -> Unit = {},
+    sharingEnabled: Boolean = true,
+    referralCount: Int = 0,
+    onOpenShareScoreCard: () -> Unit = {},
+    onOpenInviteFriend: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var showHealthDialog by remember { mutableStateOf(false) }
@@ -688,16 +693,38 @@ fun DashboardScreen(
                             }
                             Icon(Icons.Default.ChevronRight, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
+                        val topActionSummary = monthlyReport.top3Actions.firstOrNull()?.let {
+                            FinancialCalculator.resolveActionOneLineSummary(it)
+                        } ?: dailyLesson.title
                         Text(
-                            text = "Top Next Action: ${monthlyReport.top3Actions.firstOrNull()?.title ?: dailyLesson.title}",
-                            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold)
+                            text = "Top Action: $topActionSummary",
+                            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold),
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
                         )
-                        DataQualityBadgeRow(notes = monthlyReport.dataQualityNotes)
+                        TopLevelDataQualityWarning(
+                            notes = monthlyReport.dataQualityNotes,
+                            testTag = "home_dq_warning"
+                        )
                         Text(
                             text = "Today's 2-Min Lesson (${dailyLesson.topic}): ${dailyLesson.title}",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                        if (sharingEnabled) {
+                            Spacer(modifier = Modifier.height(2.dp))
+                            OutlinedButton(
+                                onClick = onOpenShareScoreCard,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 48.dp)
+                                    .testTag("home_share_progress_btn")
+                            ) {
+                                Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Share my progress", fontWeight = FontWeight.Bold)
+                            }
+                        }
                     }
                 }
             }
@@ -1036,6 +1063,20 @@ fun DashboardScreen(
                     badge = "${monthlyReport.currentScore}/100",
                     onClick = { onOpenTool(ToolSubScreen.LESSONS_CHECKIN) }
                 )
+            }
+
+            if (!profile.isUnder18 && sharingEnabled) {
+                item {
+                    FeatureNavCard(
+                        title = "Invite a Friend",
+                        subtitle = "Share your anonymous link & unlock in-app milestone badges",
+                        icon = Icons.Default.PersonAddAlt1,
+                        actionText = "Invite",
+                        badge = if (referralCount > 0) "$referralCount joined" else null,
+                        onClick = onOpenInviteFriend,
+                        modifier = Modifier.testTag("home_invite_friend_card")
+                    )
+                }
             }
 
             if (!profile.isUnder18) {
@@ -1540,10 +1581,11 @@ private fun FeatureNavCard(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     actionText: String,
     badge: String? = null,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     Card(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
             .clickable(onClick = onClick),

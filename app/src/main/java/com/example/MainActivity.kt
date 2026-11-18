@@ -1,5 +1,6 @@
 package com.example
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -47,6 +48,8 @@ import com.example.ui.tools.WhatIfSimulatorScreen
 import com.example.ui.traceability.ActivityHistoryScreen
 import com.example.ui.traceability.HowGrowMintDecidesScreen
 import com.example.ui.traceability.ScoreDetailScreen
+import com.example.ui.sharing.InviteFriendScreen
+import com.example.ui.sharing.ShareScoreCardScreen
 import com.example.ui.trading.PaperTradingScreen
 import com.example.ui.transactions.CsvImportAndMappingDialog
 import com.example.ui.transactions.PasteImportDialog
@@ -81,10 +84,20 @@ enum class ToolSubScreen {
     GOAL_PLANNER,
     SCORE_DETAIL,
     HOW_DECIDES,
-    ACTIVITY_HISTORY
+    ACTIVITY_HISTORY,
+    SHARE_SCORE_CARD,
+    INVITE_FRIEND
 }
 
 class MainActivity : ComponentActivity() {
+
+    private var repositoryRef: GrowMintRepository? = null
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        repositoryRef?.captureInboundReferralCode(intent.dataString)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -94,7 +107,10 @@ class MainActivity : ComponentActivity() {
 
         enableEdgeToEdge()
 
-        val repository = GrowMintRepository(applicationContext)
+        val repository = GrowMintRepository(applicationContext).also {
+            repositoryRef = it
+            it.captureInboundReferralCode(intent?.dataString)
+        }
         val coachManager = AiCoachManager()
 
         setContent {
@@ -134,6 +150,8 @@ class MainActivity : ComponentActivity() {
             val completedActionKeys by repository.completedActionKeys.collectAsStateWithLifecycle()
             val activityHistory by repository.activityHistory.collectAsStateWithLifecycle()
             val errorFlags by repository.errorFlags.collectAsStateWithLifecycle()
+            val explanationFeedback by repository.explanationFeedback.collectAsStateWithLifecycle()
+            val referralState by repository.referralState.collectAsStateWithLifecycle()
 
             CompositionLocalProvider(
                 LocalActivityLogger provides { category, title, whatChanged, whySummary, numbersSummary, ruleId ->
@@ -219,9 +237,12 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                LaunchedEffect(profile.isUnder18) {
+                LaunchedEffect(profile.isUnder18, referralState.sharingEnabled) {
                     if (profile.isUnder18 && currentScreen == AppScreen.SANDBOX) {
                         currentScreen = AppScreen.DASHBOARD
+                    }
+                    if ((profile.isUnder18 || !referralState.sharingEnabled) && activeToolScreen == ToolSubScreen.INVITE_FRIEND) {
+                        activeToolScreen = null
                     }
                 }
 
@@ -252,8 +273,14 @@ class MainActivity : ComponentActivity() {
                         if (!profile.isOnboarded) {
                             OnboardingScreen(
                                 initialProfile = profile,
+                                pendingReferralCode = referralState.pendingInboundRefCode,
+                                onInviteCodeChange = { raw ->
+                                    if (raw.isNullOrBlank()) repository.clearPendingInboundReferralCode()
+                                    else repository.captureInboundReferralCode(raw)
+                                },
                                 onComplete = { newProfile, _ ->
                                     repository.updateProfile(newProfile)
+                                    repository.completeOnboardingReferralAttribution()
                                     currentScreen = AppScreen.DASHBOARD
                                     activeToolScreen = null
                                 }
@@ -414,17 +441,36 @@ class MainActivity : ComponentActivity() {
                                         onSaveMonthlySnapshot = { snap -> repository.saveMonthlyHealthSnapshot(snap) },
                                         coachManager = coachManager,
                                         completedActionKeys = completedActionKeys,
+                                        explanationFeedback = explanationFeedback,
+                                        onSubmitExplanationFeedback = { targetId, targetType, targetTitle, summaryShown, ruleId, madeSense ->
+                                            repository.recordExplanationFeedback(
+                                                targetId = targetId,
+                                                targetType = targetType,
+                                                targetTitle = targetTitle,
+                                                summaryShown = summaryShown,
+                                                ruleId = ruleId,
+                                                madeSense = madeSense
+                                            )
+                                        },
                                         onMarkActionDone = { action ->
                                             val nums = action.traceability?.triggeringNumbers
                                                 ?.joinToString("; ") { "${it.label}: ${it.valueFormatted}" }
                                                 ?: action.howMuch
+                                            val resolvedSummary = FinancialCalculator.resolveActionOneLineSummary(action)
                                             repository.markActionDone(
                                                 actionKey = action.actionKey,
                                                 title = action.title,
                                                 whatSummary = "Completed ${action.title} (${action.howMuch})",
                                                 whySummary = action.traceability?.ruleDescription ?: action.what,
                                                 numbersSummary = nums,
-                                                ruleId = action.ruleId.ifBlank { null }
+                                                ruleId = action.ruleId.ifBlank { null },
+                                                oneLineSummary = resolvedSummary,
+                                                ruleName = action.traceability?.ruleShortName.orEmpty(),
+                                                ruleWording = action.traceability?.ruleDescription.orEmpty(),
+                                                ruleVersion = action.traceability?.ruleVersion.orEmpty(),
+                                                snapshotInputs = action.traceability?.triggeringNumbers ?: emptyList(),
+                                                whatWouldChangeThis = action.traceability?.whatWouldChangeThis.orEmpty(),
+                                                snapshotCalculatedFacts = action.traceability?.calculatedFacts ?: emptyList()
                                             )
                                         },
                                         onFlagError = { itemType, itemId, itemTitle, note, snapshotSummary, ruleId ->
@@ -433,6 +479,8 @@ class MainActivity : ComponentActivity() {
                                         onOpenScoreDetail = { activeToolScreen = ToolSubScreen.SCORE_DETAIL },
                                         onOpenHowDecides = { activeToolScreen = ToolSubScreen.HOW_DECIDES },
                                         onNavigateActionDestination = navigateToActionDestination,
+                                        sharingEnabled = referralState.sharingEnabled,
+                                        onOpenShareScoreCard = { activeToolScreen = ToolSubScreen.SHARE_SCORE_CARD },
                                         onBack = { activeToolScreen = null }
                                     )
                                     ToolSubScreen.IDEAS_LAB -> IncomeIdeasLabScreen(
@@ -484,6 +532,25 @@ class MainActivity : ComponentActivity() {
                                     ToolSubScreen.ACTIVITY_HISTORY -> ActivityHistoryScreen(
                                         activityHistory = activityHistory,
                                         errorFlags = errorFlags,
+                                        profile = profile,
+                                        coachManager = coachManager,
+                                        explanationFeedback = explanationFeedback,
+                                        onSubmitExplanationFeedback = { targetId, targetType, targetTitle, summaryShown, ruleId, madeSense ->
+                                            repository.recordExplanationFeedback(
+                                                targetId = targetId,
+                                                targetType = targetType,
+                                                targetTitle = targetTitle,
+                                                summaryShown = summaryShown,
+                                                ruleId = ruleId,
+                                                madeSense = madeSense
+                                            )
+                                        },
+                                        onSaveActivityAiExplanation = { entryId, explanation ->
+                                            repository.updateActivityAiExplanation(entryId, explanation)
+                                        },
+                                        onSaveActivityTraceableExplanation = { entryId, traceable ->
+                                            repository.updateActivityTraceableExplanation(entryId, traceable)
+                                        },
                                         onExportCsv = {
                                             exportActivityCsvLauncher.launch("growmint_activity_history.csv")
                                         },
@@ -493,6 +560,26 @@ class MainActivity : ComponentActivity() {
                                         onGetPreviewCsv = { repository.exportActivityHistoryCsv() },
                                         onGetPreviewText = { repository.exportActivityHistoryText() },
                                         onClearFlag = { flagId -> repository.clearErrorFlag(flagId) },
+                                        onBack = { activeToolScreen = null }
+                                    )
+                                    ToolSubScreen.SHARE_SCORE_CARD -> ShareScoreCardScreen(
+                                        profile = profile,
+                                        monthlyReport = monthlyImprovementReport,
+                                        referralState = referralState,
+                                        onOpenInviteFriend = {
+                                            if (!profile.isUnder18 && referralState.sharingEnabled) {
+                                                activeToolScreen = ToolSubScreen.INVITE_FRIEND
+                                            }
+                                        },
+                                        onBack = { activeToolScreen = null }
+                                    )
+                                    ToolSubScreen.INVITE_FRIEND -> InviteFriendScreen(
+                                        profile = profile,
+                                        referralState = referralState,
+                                        monthlyReport = monthlyImprovementReport,
+                                        monthlySnapshotsCount = monthlyHealthSnapshots.size,
+                                        onUpdateCustomMessage = { msg -> repository.updateCustomInviteMessage(msg) },
+                                        onRegenerateCode = { repository.regenerateReferralCode() },
                                         onBack = { activeToolScreen = null }
                                     )
                                 }
@@ -607,6 +694,14 @@ class MainActivity : ComponentActivity() {
                                                 onUndoLastImport = { repository.undoLastImport() },
                                                 onLaunchSplitForIncome = launchIncomeSplit,
                                                 onDismissIncomePrompt = { repository.dismissPendingIncomePrompt() },
+                                                sharingEnabled = referralState.sharingEnabled,
+                                                referralCount = referralState.referralCount,
+                                                onOpenShareScoreCard = { activeToolScreen = ToolSubScreen.SHARE_SCORE_CARD },
+                                                onOpenInviteFriend = {
+                                                    if (!profile.isUnder18 && referralState.sharingEnabled) {
+                                                        activeToolScreen = ToolSubScreen.INVITE_FRIEND
+                                                    }
+                                                },
                                                 modifier = Modifier.padding(innerPadding)
                                             )
                                         }
@@ -696,6 +791,9 @@ class MainActivity : ComponentActivity() {
                                                 onOpenActivityHistory = { activeToolScreen = ToolSubScreen.ACTIVITY_HISTORY },
                                                 activityCount = activityHistory.size,
                                                 errorFlagCount = errorFlags.size,
+                                                referralState = referralState,
+                                                onToggleSharingEnabled = { enabled -> repository.setSharingEnabled(enabled) },
+                                                onDeleteReferralCodeAndCount = { repository.deleteReferralCodeAndCount() },
                                                 modifier = Modifier.padding(innerPadding)
                                             )
                                         }

@@ -12,11 +12,14 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.StringReader
+import java.security.SecureRandom
 
 class GrowMintRepository(private val context: Context) {
 
     private val prefs: SharedPreferences =
         context.getSharedPreferences("growmint_virtual_ledger_prefs", Context.MODE_PRIVATE)
+    private val deviceRefPrefs: SharedPreferences =
+        context.getSharedPreferences("growmint_anonymous_referral_counts", Context.MODE_PRIVATE)
 
     // Bank Provider Adapter (defaults to Sandbox Open Banking adapter)
     val bankAdapter: BankProviderAdapter = SandboxBankProviderAdapter()
@@ -120,6 +123,13 @@ class GrowMintRepository(private val context: Context) {
 
     private val _errorFlags = MutableStateFlow(loadErrorFlags())
     val errorFlags: StateFlow<List<ErrorFlagEntry>> = _errorFlags.asStateFlow()
+
+    private val _explanationFeedback = MutableStateFlow(loadExplanationFeedback())
+    val explanationFeedback: StateFlow<List<ExplanationFeedbackEntry>> = _explanationFeedback.asStateFlow()
+
+    // === PRIVACY-SAFE SHARING & ANONYMOUS REFERRAL STATE ===
+    private val _referralState = MutableStateFlow(loadReferralState())
+    val referralState: StateFlow<ReferralState> = _referralState.asStateFlow()
 
     fun updateThemeMode(mode: AppThemeMode) {
         setThemeMode(mode)
@@ -1326,6 +1336,12 @@ class GrowMintRepository(private val context: Context) {
         _completedActionKeys.value = emptySet()
         _activityHistory.value = emptyList()
         _errorFlags.value = emptyList()
+        _explanationFeedback.value = emptyList()
+        val oldCode = _referralState.value.myReferralCode
+        if (!oldCode.isNullOrBlank()) {
+            removeReferralCodeCount(oldCode)
+        }
+        _referralState.value = loadReferralState()
     }
 
     fun deleteAllUserData() {
@@ -2057,7 +2073,18 @@ class GrowMintRepository(private val context: Context) {
         whatSummary: String,
         whySummary: String,
         numbersSummary: String,
-        ruleId: String?
+        ruleId: String?,
+        oneLineSummary: String = "",
+        ruleName: String = "",
+        ruleWording: String = "",
+        ruleVersion: String = "",
+        snapshotInputs: List<ScoreInputMetric> = emptyList(),
+        aiExplanation: String = "",
+        whatWouldChangeThis: String = "",
+        snapshotCalculatedFacts: List<CalculatedValueFact> = emptyList(),
+        aiExplanationTemplate: String = "",
+        aiExplanationIsFallback: Boolean = false,
+        aiExplanationNote: String = ""
     ) {
         if (actionKey.isBlank()) return
         val next = _completedActionKeys.value + actionKey
@@ -2069,7 +2096,18 @@ class GrowMintRepository(private val context: Context) {
             whatChanged = whatSummary,
             whySummary = whySummary,
             numbersSummary = numbersSummary,
-            ruleId = ruleId
+            ruleId = ruleId,
+            oneLineSummary = oneLineSummary,
+            ruleName = ruleName,
+            ruleWording = ruleWording,
+            ruleVersion = ruleVersion,
+            snapshotInputs = snapshotInputs,
+            aiExplanation = aiExplanation,
+            whatWouldChangeThis = whatWouldChangeThis,
+            snapshotCalculatedFacts = snapshotCalculatedFacts,
+            aiExplanationTemplate = aiExplanationTemplate,
+            aiExplanationIsFallback = aiExplanationIsFallback,
+            aiExplanationNote = aiExplanationNote
         )
     }
 
@@ -2080,8 +2118,80 @@ class GrowMintRepository(private val context: Context) {
         whySummary: String = "",
         numbersSummary: String = "",
         ruleId: String? = null,
-        timestamp: Long = System.currentTimeMillis()
+        timestamp: Long = System.currentTimeMillis(),
+        oneLineSummary: String = "",
+        ruleName: String = "",
+        ruleWording: String = "",
+        ruleVersion: String = "",
+        snapshotInputs: List<ScoreInputMetric> = emptyList(),
+        aiExplanation: String = "",
+        whatWouldChangeThis: String = "",
+        snapshotCalculatedFacts: List<CalculatedValueFact> = emptyList(),
+        aiExplanationTemplate: String = "",
+        aiExplanationIsFallback: Boolean = false,
+        aiExplanationNote: String = ""
     ) {
+        val traced = FinancialCalculator.calculateTracedMoneyHealthScore(
+            profile = _userProfile.value,
+            envelopes = _envelopes.value,
+            transactions = _transactions.value,
+            nowMillis = timestamp
+        )
+        val ruleDef = ruleId?.let { RuleRegistry.findById(it) }
+        val resolvedRuleName = ruleName.ifBlank {
+            ruleDef?.shortName ?: RuleRegistry.displayRuleName(
+                ruleId = ruleId,
+                categoryFallback = FinancialCalculator.defaultRuleNameForCategory(category)
+            )
+        }
+        val resolvedRuleVersion = ruleVersion.ifBlank { ruleDef?.version ?: "v1.0" }
+        val resolvedRuleWording = ruleWording.ifBlank {
+            ruleDef?.plainDescription ?: whySummary.ifBlank { "Reviewed and confirmed by the user." }
+        }
+        val resolvedSummary = oneLineSummary.ifBlank {
+            FinancialCalculator.buildActivityOneLineSummary(
+                title = title,
+                numbersSummary = numbersSummary,
+                whatChanged = whatChanged,
+                ruleId = ruleId,
+                category = category
+            )
+        }
+        val resolvedInputs = if (snapshotInputs.isNotEmpty()) {
+            snapshotInputs
+        } else {
+            val parsed = numbersSummary.split(";").mapNotNull { part ->
+                val clean = part.trim()
+                if (clean.isBlank()) null
+                else if (clean.contains(":")) {
+                    val idx = clean.indexOf(":")
+                    ScoreInputMetric(clean.substring(0, idx).trim(), clean.substring(idx + 1).trim(), "Confirmed snapshot")
+                } else {
+                    ScoreInputMetric("Backing figure", clean, "Confirmed snapshot")
+                }
+            }
+            parsed.ifEmpty { traced.components.flatMap { it.inputs }.take(4) }
+        }
+        val resolvedFacts = snapshotCalculatedFacts.ifEmpty {
+            FinancialCalculator.buildFactsForActivityEntry(
+                title = title,
+                category = category,
+                numbersSummary = numbersSummary,
+                ruleId = ruleId,
+                snapshotInputs = resolvedInputs,
+                snapshotTotalScore = traced.totalScore
+            )
+        }
+        val resolvedAiExplanation = aiExplanation.ifBlank {
+            FinancialCalculator.resolveTemplateToPlainText(
+                FinancialCalculator.buildActivityFallbackTemplate(title, resolvedRuleWording, resolvedFacts),
+                resolvedFacts
+            )
+        }
+        val resolvedChangeCondition = whatWouldChangeThis.ifBlank {
+            ruleDef?.triggerCondition.orEmpty()
+        }
+
         val entry = ActivityHistoryEntry(
             timestamp = timestamp,
             category = category,
@@ -2089,11 +2199,82 @@ class GrowMintRepository(private val context: Context) {
             whatChanged = whatChanged,
             whySummary = whySummary,
             numbersSummary = numbersSummary,
-            ruleId = ruleId
+            ruleId = ruleId,
+            oneLineSummary = resolvedSummary,
+            ruleName = resolvedRuleName,
+            ruleWording = resolvedRuleWording,
+            ruleVersion = resolvedRuleVersion,
+            snapshotTotalScore = traced.totalScore,
+            snapshotInputs = resolvedInputs,
+            snapshotScoreComponents = traced.components,
+            aiExplanation = resolvedAiExplanation,
+            dataQualityNotes = traced.dataQualityNotes,
+            snapshotCalculatedFacts = resolvedFacts,
+            aiExplanationTemplate = aiExplanationTemplate,
+            aiExplanationIsFallback = aiExplanationIsFallback,
+            aiExplanationNote = aiExplanationNote,
+            whatWouldChangeThis = resolvedChangeCondition
         )
         val updated = (listOf(entry) + _activityHistory.value).take(200)
         _activityHistory.value = updated
         saveActivityHistory(updated)
+    }
+
+    fun updateActivityAiExplanation(entryId: String, explanation: String) {
+        if (entryId.isBlank() || explanation.isBlank()) return
+        val updated = _activityHistory.value.map { entry ->
+            if (entry.id == entryId) entry.copy(aiExplanation = explanation) else entry
+        }
+        _activityHistory.value = updated
+        saveActivityHistory(updated)
+    }
+
+    fun updateActivityTraceableExplanation(entryId: String, traceable: TraceableAiExplanation) {
+        if (entryId.isBlank()) return
+        val updated = _activityHistory.value.map { entry ->
+            if (entry.id == entryId) {
+                entry.copy(
+                    aiExplanation = traceable.plainResolvedText,
+                    aiExplanationTemplate = traceable.templateWithIds,
+                    aiExplanationIsFallback = traceable.isFallback,
+                    aiExplanationNote = traceable.note,
+                    snapshotCalculatedFacts = if (traceable.facts.isNotEmpty()) traceable.facts else entry.snapshotCalculatedFacts
+                )
+            } else entry
+        }
+        _activityHistory.value = updated
+        saveActivityHistory(updated)
+    }
+
+    fun recordExplanationFeedback(
+        targetId: String,
+        targetType: String,
+        targetTitle: String,
+        summaryShown: String,
+        ruleId: String?,
+        madeSense: Boolean
+    ) {
+        if (targetId.isBlank()) return
+        val entry = ExplanationFeedbackEntry(
+            targetId = targetId,
+            targetType = targetType,
+            targetTitle = targetTitle,
+            summaryShown = summaryShown,
+            ruleId = ruleId,
+            madeSense = madeSense
+        )
+        val filtered = _explanationFeedback.value.filterNot {
+            it.targetId == targetId && it.targetType == targetType
+        }
+        val updated = (listOf(entry) + filtered).take(300)
+        _explanationFeedback.value = updated
+        saveExplanationFeedback(updated)
+    }
+
+    fun getExplanationFeedbackFor(targetId: String, targetType: String): Boolean? {
+        return _explanationFeedback.value.firstOrNull {
+            it.targetId == targetId && it.targetType == targetType
+        }?.madeSense
     }
 
     fun flagItemError(
@@ -2128,10 +2309,16 @@ class GrowMintRepository(private val context: Context) {
         val fmt = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US)
         fun esc(s: String): String = "\"${s.replace("\"", "\"\"")}\""
         val sb = StringBuilder()
-        sb.append("Timestamp,Date,Category,Title,WhatChanged,Why,BackingNumbers,RuleId\n")
+        sb.append("Timestamp,Date,Category,Title,WhatChanged,Why,BackingNumbers,RuleId,OneLineSummary,RuleVersion,DidThisMakeSense\n")
         _activityHistory.value.forEach { e ->
             val dateStr = fmt.format(java.util.Date(e.timestamp))
-            sb.append("${e.timestamp},${esc(dateStr)},${esc(e.category)},${esc(e.title)},${esc(e.whatChanged)},${esc(e.whySummary)},${esc(e.numbersSummary)},${esc(e.ruleId ?: "")}\n")
+            val summary = e.oneLineSummary.ifBlank {
+                FinancialCalculator.buildActivityOneLineSummary(e.title, e.numbersSummary, e.whatChanged, e.ruleId, e.category)
+            }
+            val senseAnswer = getExplanationFeedbackFor(e.id, "ACTIVITY_ENTRY")?.let {
+                if (it) "Yes" else "Not really"
+            } ?: ""
+            sb.append("${e.timestamp},${esc(dateStr)},${esc(e.category)},${esc(e.title)},${esc(e.whatChanged)},${esc(e.whySummary)},${esc(e.numbersSummary)},${esc(e.ruleId ?: "")},${esc(summary)},${esc(e.ruleVersion)},${esc(senseAnswer)}\n")
         }
         return sb.toString()
     }
@@ -2145,13 +2332,30 @@ class GrowMintRepository(private val context: Context) {
             sb.append("No confirmed changes logged yet.\n")
         } else {
             _activityHistory.value.forEach { e ->
+                val summary = e.oneLineSummary.ifBlank {
+                    FinancialCalculator.buildActivityOneLineSummary(e.title, e.numbersSummary, e.whatChanged, e.ruleId, e.category)
+                }
                 sb.append("[${fmt.format(java.util.Date(e.timestamp))}] ${e.category}: ${e.title}\n")
+                sb.append("  Summary: $summary\n")
                 sb.append("  What changed: ${e.whatChanged}\n")
                 if (e.whySummary.isNotBlank()) sb.append("  Why: ${e.whySummary}\n")
                 if (e.numbersSummary.isNotBlank()) sb.append("  Numbers: ${e.numbersSummary}\n")
-                if (!e.ruleId.isNullOrBlank()) sb.append("  Rule ID: ${e.ruleId}\n")
+                if (!e.ruleId.isNullOrBlank()) sb.append("  Rule ID: ${e.ruleId} (${e.ruleVersion})\n")
+                val senseAnswer = getExplanationFeedbackFor(e.id, "ACTIVITY_ENTRY")
+                if (senseAnswer != null) {
+                    sb.append("  Did this make sense?: ${if (senseAnswer) "Yes" else "Not really"}\n")
+                }
                 sb.append("\n")
             }
+        }
+        if (_explanationFeedback.value.isNotEmpty()) {
+            sb.append("Explanation Check Feedback\n")
+            sb.append("--------------------------\n")
+            _explanationFeedback.value.forEach { fb ->
+                sb.append("[${fmt.format(java.util.Date(fb.timestamp))}] ${fb.targetType} - ${fb.targetTitle}: ${if (fb.madeSense) "Yes" else "Not really"}\n")
+                if (fb.summaryShown.isNotBlank()) sb.append("  Summary: ${fb.summaryShown}\n")
+            }
+            sb.append("\n")
         }
         if (_errorFlags.value.isNotEmpty()) {
             sb.append("Flagged Items (This looks wrong)\n")
@@ -2256,6 +2460,83 @@ class GrowMintRepository(private val context: Context) {
                 put("whySummary", a.whySummary)
                 put("numbersSummary", a.numbersSummary)
                 put("ruleId", a.ruleId ?: "")
+                put("oneLineSummary", a.oneLineSummary)
+                put("ruleName", a.ruleName)
+                put("ruleWording", a.ruleWording)
+                put("ruleVersion", a.ruleVersion)
+                if (a.snapshotTotalScore != null) put("snapshotTotalScore", a.snapshotTotalScore)
+                put("aiExplanation", a.aiExplanation)
+
+                val inputsArr = JSONArray()
+                a.snapshotInputs.forEach { m ->
+                    inputsArr.put(JSONObject().apply {
+                        put("label", m.label)
+                        put("valueFormatted", m.valueFormatted)
+                        put("sourceNote", m.sourceNote)
+                    })
+                }
+                put("snapshotInputs", inputsArr)
+
+                val compArr = JSONArray()
+                a.snapshotScoreComponents.forEach { c ->
+                    compArr.put(JSONObject().apply {
+                        put("id", c.id)
+                        put("name", c.name)
+                        put("weightPercent", c.weightPercent)
+                        put("earnedPoints", c.earnedPoints)
+                        put("maxPoints", c.maxPoints)
+                        put("formulaPlainWords", c.formulaPlainWords)
+                        put("ruleId", c.ruleId)
+                        put("explanation", c.explanation)
+                    })
+                }
+                put("snapshotScoreComponents", compArr)
+
+                val dqArr = JSONArray()
+                a.dataQualityNotes.forEach { d ->
+                    dqArr.put(JSONObject().apply {
+                        put("id", d.id)
+                        put("label", d.label)
+                        put("detail", d.detail)
+                        put("isLowQuality", d.isLowQuality)
+                    })
+                }
+                put("dataQualityNotes", dqArr)
+
+                val factsArr = JSONArray()
+                a.snapshotCalculatedFacts.forEach { f ->
+                    factsArr.put(JSONObject().apply {
+                        put("id", f.id)
+                        put("label", f.label)
+                        put("valueFormatted", f.valueFormatted)
+                        put("unit", f.unit)
+                        put("formulaPlainWords", f.formulaPlainWords)
+                        put("source", f.source)
+                        val fInputs = JSONArray()
+                        f.inputs.forEach { m ->
+                            fInputs.put(JSONObject().apply {
+                                put("label", m.label)
+                                put("valueFormatted", m.valueFormatted)
+                                put("sourceNote", m.sourceNote)
+                            })
+                        }
+                        put("inputs", fInputs)
+                        val fContribs = JSONArray()
+                        f.contributors.forEach { cb ->
+                            fContribs.put(JSONObject().apply {
+                                put("label", cb.label)
+                                put("detail", cb.detail)
+                                put("destination", cb.destination.name)
+                            })
+                        }
+                        put("contributors", fContribs)
+                    })
+                }
+                put("snapshotCalculatedFacts", factsArr)
+                put("aiExplanationTemplate", a.aiExplanationTemplate)
+                put("aiExplanationIsFallback", a.aiExplanationIsFallback)
+                put("aiExplanationNote", a.aiExplanationNote)
+                put("whatWouldChangeThis", a.whatWouldChangeThis)
             })
         }
         prefs.edit().putString("activity_history_json", arr.toString()).apply()
@@ -2268,15 +2549,169 @@ class GrowMintRepository(private val context: Context) {
             (0 until arr.length()).map { i ->
                 val o = arr.getJSONObject(i)
                 val rId = o.optString("ruleId", "").ifBlank { null }
+                val cat = o.optString("category", "Change")
+                val title = o.getString("title")
+                val whatChanged = o.optString("whatChanged", "")
+                val whySummary = o.optString("whySummary", "")
+                val numbersSummary = o.optString("numbersSummary", "")
+                val oneLineSummary = o.optString("oneLineSummary", "").ifBlank {
+                    FinancialCalculator.buildActivityOneLineSummary(title, numbersSummary, whatChanged, rId, cat)
+                }
+                val ruleName = o.optString("ruleName", "").ifBlank {
+                    RuleRegistry.displayRuleName(rId, FinancialCalculator.defaultRuleNameForCategory(cat))
+                }
+                val ruleVersion = o.optString("ruleVersion", "").ifBlank {
+                    RuleRegistry.displayRuleVersion(rId)
+                }
+                val ruleWording = o.optString("ruleWording", "").ifBlank {
+                    RuleRegistry.displayRuleWording(rId, whySummary.ifBlank { "Reviewed and confirmed by the user." })
+                }
+
+                val inputsArr = o.optJSONArray("snapshotInputs") ?: JSONArray()
+                val snapshotInputs = (0 until inputsArr.length()).map { j ->
+                    val m = inputsArr.getJSONObject(j)
+                    ScoreInputMetric(
+                        label = m.optString("label", ""),
+                        valueFormatted = m.optString("valueFormatted", ""),
+                        sourceNote = m.optString("sourceNote", "")
+                    )
+                }
+
+                val compArr = o.optJSONArray("snapshotScoreComponents") ?: JSONArray()
+                val snapshotComponents = (0 until compArr.length()).map { j ->
+                    val c = compArr.getJSONObject(j)
+                    ScoreComponentDetail(
+                        id = c.optString("id", ""),
+                        name = c.optString("name", ""),
+                        weightPercent = c.optInt("weightPercent", 0),
+                        earnedPoints = c.optInt("earnedPoints", 0),
+                        maxPoints = c.optInt("maxPoints", 0),
+                        formulaPlainWords = c.optString("formulaPlainWords", ""),
+                        inputs = emptyList(),
+                        ruleId = c.optString("ruleId", ""),
+                        explanation = c.optString("explanation", "")
+                    )
+                }
+
+                val dqArr = o.optJSONArray("dataQualityNotes") ?: JSONArray()
+                val dqNotes = (0 until dqArr.length()).map { j ->
+                    val d = dqArr.getJSONObject(j)
+                    DataQualityNote(
+                        id = d.optString("id", ""),
+                        label = d.optString("label", ""),
+                        detail = d.optString("detail", ""),
+                        isLowQuality = d.optBoolean("isLowQuality", false)
+                    )
+                }
+
+                val totalScore = if (o.has("snapshotTotalScore")) o.optInt("snapshotTotalScore") else null
+
+                val factsArr = o.optJSONArray("snapshotCalculatedFacts") ?: JSONArray()
+                val loadedFacts = (0 until factsArr.length()).map { j ->
+                    val f = factsArr.getJSONObject(j)
+                    val fInputsArr = f.optJSONArray("inputs") ?: JSONArray()
+                    val fInputs = (0 until fInputsArr.length()).map { k ->
+                        val m = fInputsArr.getJSONObject(k)
+                        ScoreInputMetric(
+                            label = m.optString("label", ""),
+                            valueFormatted = m.optString("valueFormatted", ""),
+                            sourceNote = m.optString("sourceNote", "")
+                        )
+                    }
+                    val fContribArr = f.optJSONArray("contributors") ?: JSONArray()
+                    val fContribs = (0 until fContribArr.length()).mapNotNull { k ->
+                        val cb = fContribArr.getJSONObject(k)
+                        val destName = cb.optString("destination", "")
+                        val dest = runCatching { ActionTargetDestination.valueOf(destName) }.getOrNull() ?: return@mapNotNull null
+                        ActionContributorItem(
+                            label = cb.optString("label", ""),
+                            detail = cb.optString("detail", ""),
+                            destination = dest
+                        )
+                    }
+                    CalculatedValueFact(
+                        id = f.optString("id", "V${j + 1}"),
+                        label = f.optString("label", ""),
+                        valueFormatted = f.optString("valueFormatted", ""),
+                        unit = f.optString("unit", ""),
+                        formulaPlainWords = f.optString("formulaPlainWords", ""),
+                        source = f.optString("source", ""),
+                        inputs = fInputs,
+                        contributors = fContribs
+                    )
+                }.ifEmpty {
+                    FinancialCalculator.buildFactsForActivityEntry(
+                        title = title,
+                        category = cat,
+                        numbersSummary = numbersSummary,
+                        ruleId = rId,
+                        snapshotInputs = snapshotInputs,
+                        snapshotTotalScore = totalScore
+                    )
+                }
+
                 ActivityHistoryEntry(
                     id = o.optString("id", java.util.UUID.randomUUID().toString()),
                     timestamp = o.getLong("timestamp"),
-                    category = o.optString("category", "Change"),
-                    title = o.getString("title"),
-                    whatChanged = o.optString("whatChanged", ""),
-                    whySummary = o.optString("whySummary", ""),
-                    numbersSummary = o.optString("numbersSummary", ""),
-                    ruleId = rId
+                    category = cat,
+                    title = title,
+                    whatChanged = whatChanged,
+                    whySummary = whySummary,
+                    numbersSummary = numbersSummary,
+                    ruleId = rId,
+                    oneLineSummary = oneLineSummary,
+                    ruleName = ruleName,
+                    ruleWording = ruleWording,
+                    ruleVersion = ruleVersion,
+                    snapshotTotalScore = totalScore,
+                    snapshotInputs = snapshotInputs,
+                    snapshotScoreComponents = snapshotComponents,
+                    aiExplanation = o.optString("aiExplanation", ""),
+                    dataQualityNotes = dqNotes,
+                    snapshotCalculatedFacts = loadedFacts,
+                    aiExplanationTemplate = o.optString("aiExplanationTemplate", ""),
+                    aiExplanationIsFallback = o.optBoolean("aiExplanationIsFallback", false),
+                    aiExplanationNote = o.optString("aiExplanationNote", ""),
+                    whatWouldChangeThis = o.optString("whatWouldChangeThis", "")
+                )
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun saveExplanationFeedback(list: List<ExplanationFeedbackEntry>) {
+        val arr = JSONArray()
+        list.forEach { fb ->
+            arr.put(JSONObject().apply {
+                put("id", fb.id)
+                put("targetId", fb.targetId)
+                put("targetType", fb.targetType)
+                put("targetTitle", fb.targetTitle)
+                put("summaryShown", fb.summaryShown)
+                put("ruleId", fb.ruleId ?: "")
+                put("madeSense", fb.madeSense)
+                put("timestamp", fb.timestamp)
+            })
+        }
+        prefs.edit().putString("explanation_feedback_json", arr.toString()).apply()
+    }
+
+    private fun loadExplanationFeedback(): List<ExplanationFeedbackEntry> {
+        val raw = prefs.getString("explanation_feedback_json", null) ?: return emptyList()
+        return try {
+            val arr = JSONArray(raw)
+            (0 until arr.length()).map { i ->
+                val o = arr.getJSONObject(i)
+                ExplanationFeedbackEntry(
+                    id = o.optString("id", java.util.UUID.randomUUID().toString()),
+                    targetId = o.getString("targetId"),
+                    targetType = o.optString("targetType", "ACTION"),
+                    targetTitle = o.optString("targetTitle", ""),
+                    summaryShown = o.optString("summaryShown", ""),
+                    ruleId = o.optString("ruleId", "").ifBlank { null },
+                    madeSense = o.getBoolean("madeSense"),
+                    timestamp = o.optLong("timestamp", System.currentTimeMillis())
                 )
             }
         } catch (_: Exception) {
@@ -2322,6 +2757,181 @@ class GrowMintRepository(private val context: Context) {
         } catch (_: Exception) {
             emptyList()
         }
+    }
+
+    // === PRIVACY-SAFE ANONYMOUS REFERRAL TRACKING (COUNTS ONLY) ===
+
+    private fun generateAnonymousReferralCode(excludeCode: String? = null): String {
+        val alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+        val random = SecureRandom()
+        repeat(10) {
+            val sb = StringBuilder(8)
+            repeat(8) {
+                sb.append(alphabet[random.nextInt(alphabet.length)])
+            }
+            val candidate = sb.toString()
+            if (candidate != excludeCode) return candidate
+        }
+        return "GM234567"
+    }
+
+    private fun loadReferralCountsMap(): MutableMap<String, Int> {
+        val raw = deviceRefPrefs.getString("referral_counts_json", null) ?: return mutableMapOf()
+        return try {
+            val obj = JSONObject(raw)
+            val map = mutableMapOf<String, Int>()
+            val keys = obj.keys()
+            while (keys.hasNext()) {
+                val k = keys.next()
+                map[k] = obj.optInt(k, 0).coerceAtLeast(0)
+            }
+            map
+        } catch (_: Exception) {
+            mutableMapOf()
+        }
+    }
+
+    private fun saveReferralCountsMap(map: Map<String, Int>) {
+        val obj = JSONObject()
+        map.forEach { (code, count) ->
+            obj.put(code, count.coerceAtLeast(0))
+        }
+        deviceRefPrefs.edit().putString("referral_counts_json", obj.toString()).apply()
+    }
+
+    private fun removeReferralCodeCount(code: String) {
+        val map = loadReferralCountsMap()
+        if (map.remove(code) != null) {
+            saveReferralCountsMap(map)
+        }
+    }
+
+    private fun loadReferralState(): ReferralState {
+        val isDeleted = prefs.getBoolean("referral_code_deleted", false)
+        var myCode = prefs.getString("referral_my_code", null)
+        if (myCode.isNullOrBlank() && !isDeleted) {
+            myCode = generateAnonymousReferralCode()
+            prefs.edit().putString("referral_my_code", myCode).apply()
+        } else if (isDeleted) {
+            myCode = null
+        }
+        val counts = loadReferralCountsMap()
+        val myCount = if (!myCode.isNullOrBlank()) counts[myCode] ?: 0 else 0
+        val sharingEnabled = prefs.getBoolean("referral_sharing_enabled", true)
+        val pendingInbound = prefs.getString("referral_pending_inbound_code", null)
+        val hasRedeemed = deviceRefPrefs.getBoolean("referral_has_redeemed", false)
+        val customMsg = prefs.getString("referral_custom_message", null)
+            ?: ReferralState.DEFAULT_INVITE_MESSAGE
+        return ReferralState(
+            myReferralCode = myCode,
+            referralCount = myCount,
+            sharingEnabled = sharingEnabled,
+            pendingInboundRefCode = pendingInbound,
+            hasRedeemedReferral = hasRedeemed,
+            customInviteMessage = customMsg
+        )
+    }
+
+    fun setSharingEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean("referral_sharing_enabled", enabled).apply()
+        _referralState.value = _referralState.value.copy(sharingEnabled = enabled)
+    }
+
+    fun deleteReferralCodeAndCount() {
+        val currentCode = _referralState.value.myReferralCode
+        if (!currentCode.isNullOrBlank()) {
+            prefs.edit().putString("referral_last_deleted_code", currentCode).apply()
+            removeReferralCodeCount(currentCode)
+        }
+        prefs.edit()
+            .remove("referral_my_code")
+            .putBoolean("referral_code_deleted", true)
+            .apply()
+        _referralState.value = _referralState.value.copy(
+            myReferralCode = null,
+            referralCount = 0
+        )
+    }
+
+    fun regenerateReferralCode() {
+        val prevDeleted = prefs.getString("referral_last_deleted_code", null)
+        val newCode = generateAnonymousReferralCode(excludeCode = prevDeleted ?: _referralState.value.myReferralCode)
+        val map = loadReferralCountsMap()
+        map[newCode] = 0
+        saveReferralCountsMap(map)
+        prefs.edit()
+            .putString("referral_my_code", newCode)
+            .putBoolean("referral_code_deleted", false)
+            .apply()
+        _referralState.value = _referralState.value.copy(
+            myReferralCode = newCode,
+            referralCount = 0
+        )
+    }
+
+    fun updateCustomInviteMessage(rawMessage: String) {
+        val safeMsg = FinancialCalculator.sanitizeInviteMessage(rawMessage)
+        prefs.edit().putString("referral_custom_message", safeMsg).apply()
+        _referralState.value = _referralState.value.copy(customInviteMessage = safeMsg)
+    }
+
+    fun captureInboundReferralCode(rawUriOrCode: String?): String? {
+        val parsed = FinancialCalculator.parseReferralCodeFromUriOrText(rawUriOrCode) ?: return null
+        prefs.edit().putString("referral_pending_inbound_code", parsed).apply()
+        _referralState.value = _referralState.value.copy(pendingInboundRefCode = parsed)
+        return parsed
+    }
+
+    fun clearPendingInboundReferralCode() {
+        prefs.edit().remove("referral_pending_inbound_code").apply()
+        _referralState.value = _referralState.value.copy(pendingInboundRefCode = null)
+    }
+
+    /**
+     * Runs ONLY when onboarding completes. Stores ONLY {code, count}, never storing referred person details.
+     * Enforces self-referral blocking and one-time redemption per device/install.
+     */
+    fun completeOnboardingReferralAttribution(): ReferralAttributionResult {
+        val pending = _referralState.value.pendingInboundRefCode ?: return ReferralAttributionResult.NONE
+        prefs.edit().remove("referral_pending_inbound_code").apply()
+
+        if (!FinancialCalculator.isValidReferralCodeFormat(pending)) {
+            _referralState.value = _referralState.value.copy(pendingInboundRefCode = null)
+            return ReferralAttributionResult.INVALID_CODE
+        }
+
+        val ownCode = _referralState.value.myReferralCode
+        if (!ownCode.isNullOrBlank() && ownCode.equals(pending, ignoreCase = true)) {
+            _referralState.value = _referralState.value.copy(pendingInboundRefCode = null)
+            return ReferralAttributionResult.SELF_REFERRAL_BLOCKED
+        }
+
+        val alreadyRedeemed = deviceRefPrefs.getBoolean("referral_has_redeemed", false)
+        if (alreadyRedeemed) {
+            _referralState.value = _referralState.value.copy(
+                pendingInboundRefCode = null,
+                hasRedeemedReferral = true
+            )
+            return ReferralAttributionResult.DUPLICATE_BLOCKED
+        }
+
+        val counts = loadReferralCountsMap()
+        val updatedCount = (counts[pending] ?: 0) + 1
+        counts[pending] = updatedCount
+        saveReferralCountsMap(counts)
+        deviceRefPrefs.edit().putBoolean("referral_has_redeemed", true).apply()
+
+        val refreshedOwnCount = if (!ownCode.isNullOrBlank()) counts[ownCode] ?: 0 else 0
+        _referralState.value = _referralState.value.copy(
+            referralCount = refreshedOwnCount,
+            pendingInboundRefCode = null,
+            hasRedeemedReferral = true
+        )
+        return ReferralAttributionResult.CREDITED
+    }
+
+    fun getCountForReferralCode(code: String): Int {
+        return loadReferralCountsMap()[code.trim().uppercase()] ?: 0
     }
 }
 

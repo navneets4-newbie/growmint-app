@@ -1,5 +1,6 @@
 package com.example.ui.tools
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -19,15 +20,21 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.ai.AiCoachManager
 import com.example.data.FinancialCalculator
+import com.example.data.RuleRegistry
 import com.example.model.*
 import com.example.ui.components.ConfirmActionDialog
 import com.example.ui.components.DataQualityBadgeRow
+import com.example.ui.components.ExplanationSenseCheckRow
 import com.example.ui.components.PersistentDisclaimerBanner
 import com.example.ui.components.ReportErrorDialog
+import com.example.ui.components.ScannableLabelValueRow
+import com.example.ui.components.TopLevelDataQualityWarning
+import com.example.ui.components.TraceableExplanationTextWithChips
 import com.example.ui.traceability.WhyActionDialog
 import com.example.ui.theme.*
 import java.text.SimpleDateFormat
@@ -50,11 +57,15 @@ fun WeeklyCheckInAndLessonsScreen(
     onSaveMonthlySnapshot: (MonthlyHealthSnapshot) -> Unit = {},
     coachManager: AiCoachManager = remember { AiCoachManager() },
     completedActionKeys: Set<String> = emptySet(),
+    explanationFeedback: List<ExplanationFeedbackEntry> = emptyList(),
+    onSubmitExplanationFeedback: (targetId: String, targetType: String, targetTitle: String, summaryShown: String, ruleId: String?, madeSense: Boolean) -> Unit = { _, _, _, _, _, _ -> },
     onMarkActionDone: (MonthlyActionItem) -> Unit = {},
     onFlagError: (itemType: String, itemId: String, itemTitle: String, note: String, snapshotSummary: String, ruleId: String?) -> Unit = { _, _, _, _, _, _ -> },
     onOpenScoreDetail: () -> Unit = {},
     onOpenHowDecides: () -> Unit = {},
     onNavigateActionDestination: (ActionTargetDestination) -> Unit = {},
+    sharingEnabled: Boolean = true,
+    onOpenShareScoreCard: () -> Unit = {},
     onBack: () -> Unit,
     initialTab: Int = 0,
     modifier: Modifier = Modifier
@@ -149,9 +160,16 @@ fun WeeklyCheckInAndLessonsScreen(
             if (selectedTab == 0) {
                 MonthlyReportTabContent(
                     report = monthlyReport,
+                    profile = profile,
+                    coachManager = coachManager,
                     hasSavedCurrentMonth = hasSavedCurrentMonth,
                     completedActionKeys = completedActionKeys,
+                    explanationFeedback = explanationFeedback,
+                    onSubmitExplanationFeedback = onSubmitExplanationFeedback,
                     onOpenScoreDetail = onOpenScoreDetail,
+                    onNavigateActionDestination = onNavigateActionDestination,
+                    sharingEnabled = sharingEnabled,
+                    onOpenShareScoreCard = onOpenShareScoreCard,
                     onRequestSaveSnapshot = { showConfirmMonthlySnapshot = true },
                     onWhyAction = { action -> whyDialogAction = action },
                     onRequestMarkDone = { action -> pendingMarkDoneAction = action },
@@ -451,11 +469,28 @@ fun WeeklyCheckInAndLessonsScreen(
     }
 
     whyDialogAction?.let { action ->
+        val actionFeedback = explanationFeedback.firstOrNull {
+            it.targetType == "ACTION" && it.targetId == action.actionKey
+        }?.madeSense
+        val resolvedSummary = FinancialCalculator.resolveActionOneLineSummary(action)
         WhyActionDialog(
             action = action,
             profile = profile,
             dataQualityNotes = monthlyReport.dataQualityNotes,
             coachManager = coachManager,
+            scoreComponents = monthlyReport.tracedScore?.components ?: emptyList(),
+            explanationFeedbackAnswer = actionFeedback,
+            onSubmitExplanationFeedback = { madeSense ->
+                onSubmitExplanationFeedback(
+                    action.actionKey,
+                    "ACTION",
+                    action.title,
+                    resolvedSummary,
+                    action.ruleId.ifBlank { null },
+                    madeSense
+                )
+                snackbarMessage = if (madeSense) "Saved: explanation made sense." else "Saved: flagged as unclear."
+            },
             onNavigateDestination = onNavigateActionDestination,
             onOpenHowDecides = {
                 whyDialogAction = null
@@ -489,6 +524,7 @@ fun WeeklyCheckInAndLessonsScreen(
             backingNumbers = numbersText,
             ruleId = action.ruleId.ifBlank { null },
             activityCategory = "Action Completed",
+            skipActivityLog = true,
             onConfirm = {
                 onMarkActionDone(action)
                 snackbarMessage = "Marked \"${action.title}\" done & logged to Activity History."
@@ -517,15 +553,28 @@ fun WeeklyCheckInAndLessonsScreen(
 @Composable
 private fun MonthlyReportTabContent(
     report: MonthlyImprovementReport,
+    profile: UserProfile,
+    coachManager: AiCoachManager,
     hasSavedCurrentMonth: Boolean,
     completedActionKeys: Set<String>,
+    explanationFeedback: List<ExplanationFeedbackEntry>,
+    onSubmitExplanationFeedback: (targetId: String, targetType: String, targetTitle: String, summaryShown: String, ruleId: String?, madeSense: Boolean) -> Unit,
     onOpenScoreDetail: () -> Unit,
+    onNavigateActionDestination: (ActionTargetDestination) -> Unit,
+    sharingEnabled: Boolean,
+    onOpenShareScoreCard: () -> Unit,
     onRequestSaveSnapshot: () -> Unit,
     onWhyAction: (MonthlyActionItem) -> Unit,
     onRequestMarkDone: (MonthlyActionItem) -> Unit,
     onFlagScore: () -> Unit,
     onFlagAction: (MonthlyActionItem) -> Unit
 ) {
+    var expandedActionKeys by remember { mutableStateOf<Set<String>>(emptySet()) }
+    val feedbackByActionKey = remember(explanationFeedback) {
+        explanationFeedback
+            .filter { it.targetType == "ACTION" }
+            .associateBy { it.targetId }
+    }
     val deltaColor = when {
         report.previousScore == null -> MintPrimary
         report.scoreDelta > 0 -> FinanceGreen
@@ -597,7 +646,10 @@ private fun MonthlyReportTabContent(
                         )
                     }
 
-                    DataQualityBadgeRow(notes = report.dataQualityNotes)
+                    TopLevelDataQualityWarning(
+                        notes = report.dataQualityNotes,
+                        testTag = "monthly_hero_dq_warning"
+                    )
 
                     Text(
                         text = report.summary,
@@ -631,6 +683,20 @@ private fun MonthlyReportTabContent(
                             Icon(Icons.Default.Flag, contentDescription = "This looks wrong", tint = FinanceRed, modifier = Modifier.size(15.dp))
                             Spacer(modifier = Modifier.width(4.dp))
                             Text("This looks wrong", color = FinanceRed, fontSize = 11.sp)
+                        }
+                    }
+
+                    if (sharingEnabled) {
+                        OutlinedButton(
+                            onClick = onOpenShareScoreCard,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 48.dp)
+                                .testTag("monthly_report_share_progress_btn")
+                        ) {
+                            Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Share my progress", fontWeight = FontWeight.Bold)
                         }
                     }
                 }
@@ -735,13 +801,43 @@ private fun MonthlyReportTabContent(
                     style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
                     color = MaterialTheme.colorScheme.primary
                 )
-                DataQualityBadgeRow(notes = report.dataQualityNotes)
+                Text(
+                    text = "Tap any summary to view full inputs, rule wording, and explanation.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                TopLevelDataQualityWarning(
+                    notes = report.dataQualityNotes,
+                    testTag = "top_actions_dq_warning"
+                )
             }
         }
 
-        items(report.top3Actions) { action ->
+        items(report.top3Actions, key = { it.actionKey.ifBlank { "${it.priority}_${it.title}" } }) { action ->
             val isDone = completedActionKeys.contains(action.actionKey)
             val expectedDelta = action.traceability?.expectedScoreDelta ?: 0
+            val isExpanded = expandedActionKeys.contains(action.actionKey)
+            val oneLineSummary = remember(action) { FinancialCalculator.resolveActionOneLineSummary(action) }
+            val trace = action.traceability
+            val savedSense = feedbackByActionKey[action.actionKey]?.madeSense
+            val ruleDisplayName = trace?.ruleShortName?.ifBlank { null }
+                ?: RuleRegistry.displayRuleName(action.ruleId)
+            val ruleVersion = trace?.ruleVersion?.ifBlank { null }
+                ?: RuleRegistry.displayRuleVersion(action.ruleId)
+            val ruleWording = trace?.ruleDescription?.ifBlank { null }
+                ?: RuleRegistry.displayRuleWording(action.ruleId, action.what)
+
+            var traceableExplanation by remember(action.actionKey) { mutableStateOf<TraceableAiExplanation?>(null) }
+            var isLoadingAi by remember(action.actionKey) { mutableStateOf(false) }
+
+            LaunchedEffect(isExpanded, action.actionKey) {
+                if (isExpanded && traceableExplanation == null) {
+                    isLoadingAi = true
+                    traceableExplanation = coachManager.explainActionTraceable(action, profile)
+                    isLoadingAi = false
+                }
+            }
+
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -753,8 +849,21 @@ private fun MonthlyReportTabContent(
                 )
             ) {
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    // Tappable One-Line Summary Header (Action · Key Number · Rule Name)
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .defaultMinSize(minHeight = 48.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable {
+                                expandedActionKeys = if (isExpanded) {
+                                    expandedActionKeys - action.actionKey
+                                } else {
+                                    expandedActionKeys + action.actionKey
+                                }
+                            }
+                            .padding(vertical = 4.dp)
+                            .testTag("action_summary_${action.priority}"),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -774,41 +883,276 @@ private fun MonthlyReportTabContent(
                                 }
                             }
                             Spacer(modifier = Modifier.width(10.dp))
-                            Text(action.title, style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold))
+                            Text(
+                                text = oneLineSummary,
+                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                maxLines = if (isExpanded) 3 else 2,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
                         }
-                        if (action.ruleId.isNotBlank()) {
-                            Surface(color = MintPrimary.copy(alpha = 0.14f), shape = RoundedCornerShape(6.dp)) {
-                                Text(
-                                    text = action.ruleId.removePrefix("RULE_"),
-                                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, fontWeight = FontWeight.Bold),
-                                    color = MintPrimary,
-                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Icon(
+                            imageVector = if (isExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                            contentDescription = if (isExpanded) "Collapse details" else "Expand snapshot details",
+                            tint = MintPrimary
+                        )
+                    }
+
+                    // Top-level data quality flag shown ONLY when low quality affects the result
+                    TopLevelDataQualityWarning(
+                        notes = report.dataQualityNotes,
+                        testTag = "action_dq_warning_${action.priority}"
+                    )
+
+                    // Scannable collapsed rows in consistent order (no long paragraphs)
+                    ScannableLabelValueRow(
+                        label = "Target",
+                        value = action.howMuch,
+                        valueColor = MintPrimary
+                    )
+                    ScannableLabelValueRow(
+                        label = "When",
+                        value = action.byWhen
+                    )
+                    ScannableLabelValueRow(
+                        label = "Score impact",
+                        value = if (expectedDelta > 0) "+$expectedDelta pts (${report.currentScore} -> ${trace?.projectedNewScore})" else "Maintains trend",
+                        valueColor = if (expectedDelta > 0) FinanceGreen else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (!trace?.whatWouldChangeThis.isNullOrBlank()) {
+                        ScannableLabelValueRow(
+                            label = "What would change this?",
+                            value = trace!!.whatWouldChangeThis,
+                            maxLines = 2,
+                            modifier = Modifier.testTag("action_change_threshold_${action.priority}")
+                        )
+                    }
+
+                    // Expanded Full Decision Snapshot
+                    AnimatedVisibility(visible = isExpanded) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 4.dp)
+                                .testTag("action_expanded_${action.priority}"),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            HorizontalDivider()
+
+                            Surface(
+                                color = MaterialTheme.colorScheme.surface,
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Text(
+                                        text = "What to do",
+                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                        color = MintPrimary
+                                    )
+                                    Text(
+                                        text = action.what,
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
                             }
+
+                            Surface(
+                                color = MintPrimary.copy(alpha = 0.09f),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Text(
+                                        text = "Rule & Version: $ruleDisplayName (${action.ruleId} · $ruleVersion)",
+                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                        color = MintPrimary
+                                    )
+                                    Text(
+                                        text = ruleWording,
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                    if (!trace?.triggerCondition.isNullOrBlank()) {
+                                        Text(
+                                            text = "Condition: ${trace?.triggerCondition}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+
+                            if (trace != null && trace.triggeringNumbers.isNotEmpty()) {
+                                Surface(
+                                    color = MaterialTheme.colorScheme.surface,
+                                    shape = RoundedCornerShape(10.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(
+                                        modifier = Modifier.padding(10.dp),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Text(
+                                            text = "Inputs & Sources Used",
+                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                        trace.triggeringNumbers.forEach { metric ->
+                                            ScannableLabelValueRow(
+                                                label = metric.label,
+                                                value = metric.valueFormatted
+                                            )
+                                        }
+                                        if (trace.dataSources.isNotEmpty()) {
+                                            Text(
+                                                text = "Sources: ${trace.dataSources.joinToString(", ")}",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.padding(top = 2.dp)
+                                            )
+                                        }
+                                        if (trace.contributors.isNotEmpty()) {
+                                            trace.contributors.forEach { contributor ->
+                                                Row(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .defaultMinSize(minHeight = 40.dp)
+                                                        .clip(RoundedCornerShape(8.dp))
+                                                        .clickable { onNavigateActionDestination(contributor.destination) }
+                                                        .padding(vertical = 4.dp),
+                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Column(modifier = Modifier.weight(1f)) {
+                                                        Text(
+                                                            text = contributor.label,
+                                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
+                                                        )
+                                                        Text(
+                                                            text = "${contributor.detail} · Open ${contributor.destination.label}",
+                                                            style = MaterialTheme.typography.labelSmall,
+                                                            color = MintPrimary
+                                                        )
+                                                    }
+                                                    Icon(
+                                                        imageVector = Icons.Default.ChevronRight,
+                                                        contentDescription = contributor.destination.label,
+                                                        tint = MintPrimary,
+                                                        modifier = Modifier.size(16.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            val scoreComponents = report.tracedScore?.components.orEmpty()
+                            if (scoreComponents.isNotEmpty()) {
+                                Surface(
+                                    color = MaterialTheme.colorScheme.surface,
+                                    shape = RoundedCornerShape(10.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(
+                                        modifier = Modifier.padding(10.dp),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Text(
+                                            text = "Score Components Snapshot (${report.currentScore}/100)",
+                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                        scoreComponents.forEach { comp ->
+                                            ScannableLabelValueRow(
+                                                label = "${comp.name} (${comp.weightPercent}%)",
+                                                value = "${comp.earnedPoints}/${comp.maxPoints} pts"
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            Surface(
+                                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Text(
+                                        text = "AI Plain-Language Explanation",
+                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                    if (isLoadingAi) {
+                                        Text(
+                                            text = "Building plain-language summary from stored rule facts...",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    } else {
+                                        val exp = traceableExplanation
+                                        if (exp != null) {
+                                            TraceableExplanationTextWithChips(
+                                                templateWithIds = exp.templateWithIds,
+                                                facts = exp.facts,
+                                                isFallback = exp.isFallback,
+                                                fallbackNote = exp.note,
+                                                onNavigateDestination = onNavigateActionDestination,
+                                                testTagPrefix = "action_trace_${action.priority}"
+                                            )
+                                        } else {
+                                            Text(
+                                                text = action.what,
+                                                style = MaterialTheme.typography.bodySmall
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(
+                                    text = "Data-Quality Notes",
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                DataQualityBadgeRow(notes = report.dataQualityNotes)
+                                report.dataQualityNotes.forEach { note ->
+                                    Text(
+                                        text = "• ${note.label}: ${note.detail}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+
+                            ExplanationSenseCheckRow(
+                                currentAnswer = savedSense,
+                                onSelectAnswer = { madeSense ->
+                                    onSubmitExplanationFeedback(
+                                        action.actionKey,
+                                        "ACTION",
+                                        action.title,
+                                        oneLineSummary,
+                                        action.ruleId.ifBlank { null },
+                                        madeSense
+                                    )
+                                },
+                                yesTag = "action_sense_yes_${action.priority}",
+                                noTag = "action_sense_no_${action.priority}"
+                            )
                         }
-                    }
-                    Text("What: ${action.what}", style = MaterialTheme.typography.bodySmall)
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(
-                            text = "How much: ${action.howMuch}",
-                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
-                            color = MintPrimary
-                        )
-                        Text(
-                            text = action.byWhen,
-                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    if (expectedDelta > 0) {
-                        Text(
-                            text = "Code-estimated effect: +$expectedDelta score pts (${report.currentScore} -> ${action.traceability?.projectedNewScore})",
-                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
-                            color = FinanceGreen
-                        )
                     }
 
                     Row(

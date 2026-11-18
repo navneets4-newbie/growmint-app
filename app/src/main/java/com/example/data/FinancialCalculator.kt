@@ -1316,6 +1316,84 @@ object FinancialCalculator {
                     )
                 }
             }
+            val monthsSaved = if (bufferStatus.typicalMonthlySpending > 0.0) {
+                bufferStatus.currentEmergencyAmount / bufferStatus.typicalMonthlySpending
+            } else {
+                0.0
+            }
+            val bufferSummary = "Build buffer: ${formatCompactMonths(monthsSaved)} months saved (target ${formatCompactMonths(bufferStatus.targetMonths)}) · ${rule.shortName}"
+            val bufferSource = if (calc.usesSetupSpendingFallback) {
+                "Setup expense baseline"
+            } else {
+                "30-day logged expenses (${calc.recentExpenseTxCount} tx)"
+            }
+            val bufferFacts = listOf(
+                CalculatedValueFact(
+                    id = "V1",
+                    label = "Buffer coverage",
+                    valueFormatted = "${formatCompactMonths(monthsSaved)} months",
+                    unit = "months",
+                    formulaPlainWords = "Emergency Safety Net balance divided by typical monthly spending",
+                    source = "Virtual Envelope: Emergency Safety Net",
+                    inputs = listOf(
+                        ScoreInputMetric("Emergency Buffer Saved", CurrenciesAndCountries.format(bufferStatus.currentEmergencyAmount, currency)),
+                        ScoreInputMetric("Typical Monthly Spending", CurrenciesAndCountries.format(bufferStatus.typicalMonthlySpending, currency))
+                    ),
+                    contributors = contributors
+                ),
+                CalculatedValueFact(
+                    id = "V2",
+                    label = "Buffer target",
+                    valueFormatted = "${formatCompactMonths(bufferStatus.targetMonths)} months",
+                    unit = "months",
+                    formulaPlainWords = "Target months configured in Safety Buffer settings",
+                    source = bufferSource,
+                    inputs = listOf(
+                        ScoreInputMetric("Target Amount", CurrenciesAndCountries.format(bufferStatus.targetAmount, currency)),
+                        ScoreInputMetric("Typical Monthly Spending", CurrenciesAndCountries.format(bufferStatus.typicalMonthlySpending, currency))
+                    ),
+                    contributors = contributors.filter { it.destination == ActionTargetDestination.TRANSACTIONS }
+                ),
+                CalculatedValueFact(
+                    id = "V3",
+                    label = "Emergency savings",
+                    valueFormatted = CurrenciesAndCountries.format(bufferStatus.currentEmergencyAmount, currency),
+                    unit = currency,
+                    formulaPlainWords = "Current saved balance inside Emergency Safety Net envelope",
+                    source = "Virtual Envelope: Emergency Safety Net",
+                    inputs = listOf(
+                        ScoreInputMetric("Emergency Safety Net", CurrenciesAndCountries.format(bufferStatus.currentEmergencyAmount, currency))
+                    ),
+                    contributors = contributors.take(1)
+                ),
+                CalculatedValueFact(
+                    id = "V4",
+                    label = "Suggested step",
+                    valueFormatted = CurrenciesAndCountries.format(stepAmt, currency),
+                    unit = currency,
+                    formulaPlainWords = "25% of target buffer (minimum 25), capped at remaining gap",
+                    source = "Buffer-first rule",
+                    inputs = listOf(
+                        ScoreInputMetric("Buffer Target", CurrenciesAndCountries.format(bufferStatus.targetAmount, currency)),
+                        ScoreInputMetric("Remaining Gap", CurrenciesAndCountries.format(bufferStatus.remainingToTarget, currency))
+                    ),
+                    contributors = contributors.take(1)
+                ),
+                CalculatedValueFact(
+                    id = "V5",
+                    label = "Projected score gain",
+                    valueFormatted = if (delta > 0) "+$delta pts" else "0 pts",
+                    unit = "pts",
+                    formulaPlainWords = "Simulated Money Health Score after step minus current score",
+                    source = "4-pillar Money Health Score",
+                    inputs = listOf(
+                        ScoreInputMetric("Current Score", "$currentScore / 100"),
+                        ScoreInputMetric("Projected Score", "${simulated.totalScore} / 100")
+                    ),
+                    contributors = contributors.take(1)
+                )
+            )
+            val bufferChangeCondition = "Reach ${formatCompactMonths(bufferStatus.targetMonths)} month(s) of buffer (${CurrenciesAndCountries.format(bufferStatus.targetAmount, currency)})"
             actions.add(
                 MonthlyActionItem(
                     priority = 1,
@@ -1325,6 +1403,7 @@ object FinancialCalculator {
                     byWhen = "By $nextMonthLabel",
                     actionKey = "${currentMonthKey}_p1_${RuleRegistry.RULE_BUFFER_FIRST}",
                     ruleId = rule.id,
+                    oneLineSummary = bufferSummary,
                     traceability = ActionTraceability(
                         ruleId = rule.id,
                         ruleTitle = rule.title,
@@ -1332,6 +1411,7 @@ object FinancialCalculator {
                         triggerCondition = rule.triggerCondition,
                         triggeringNumbers = listOf(
                             ScoreInputMetric("Emergency Buffer Saved", CurrenciesAndCountries.format(bufferStatus.currentEmergencyAmount, currency)),
+                            ScoreInputMetric("Months Saved", "${formatCompactMonths(monthsSaved)} mo (target ${formatCompactMonths(bufferStatus.targetMonths)} mo)"),
                             ScoreInputMetric("1-Month Buffer Target", CurrenciesAndCountries.format(bufferStatus.targetAmount, currency)),
                             ScoreInputMetric("Remaining Gap", CurrenciesAndCountries.format(bufferStatus.remainingToTarget, currency)),
                             ScoreInputMetric("Suggested Step (25% of target)", CurrenciesAndCountries.format(stepAmt, currency))
@@ -1345,9 +1425,13 @@ object FinancialCalculator {
                         },
                         dataSources = listOf(
                             "Virtual Envelope: Emergency Safety Net",
-                            if (calc.usesSetupSpendingFallback) "Setup expense baseline" else "30-day logged expenses (${calc.recentExpenseTxCount} tx)"
+                            bufferSource
                         ),
-                        contributors = contributors
+                        contributors = contributors,
+                        ruleShortName = rule.shortName,
+                        ruleVersion = rule.version,
+                        calculatedFacts = bufferFacts,
+                        whatWouldChangeThis = bufferChangeCondition
                     )
                 )
             )
@@ -1381,6 +1465,77 @@ object FinancialCalculator {
                     )
                 )
             }
+            val goalTriggerText = if (primaryGoal != null) {
+                "target ${CurrenciesAndCountries.format(primaryGoal.targetAmount, currency)}"
+            } else {
+                "surplus ${CurrenciesAndCountries.format(max(0.0, surplus), currency)}"
+            }
+            val goalSummary = "Fund ${primaryGoal?.name ?: "top goal"}: ${CurrenciesAndCountries.format(goalAmt, currency)}/mo ($goalTriggerText) · ${rule.shortName}"
+            val goalFacts = buildList {
+                add(
+                    CalculatedValueFact(
+                        id = "V1",
+                        label = "Monthly surplus",
+                        valueFormatted = CurrenciesAndCountries.format(surplus, currency),
+                        unit = currency,
+                        formulaPlainWords = "Effective monthly income minus typical monthly spending",
+                        source = "Monthly Cashflow Surplus",
+                        inputs = listOf(
+                            ScoreInputMetric("Effective Income", CurrenciesAndCountries.format(calc.effectiveIncome, currency)),
+                            ScoreInputMetric("Typical Spending", CurrenciesAndCountries.format(calc.typicalSpending, currency))
+                        ),
+                        contributors = contributors.takeLast(1)
+                    )
+                )
+                add(
+                    CalculatedValueFact(
+                        id = "V2",
+                        label = "Goal allocation",
+                        valueFormatted = CurrenciesAndCountries.format(goalAmt, currency),
+                        unit = currency,
+                        formulaPlainWords = "40% of monthly surplus (minimum 25)",
+                        source = "Top goal rule",
+                        inputs = listOf(
+                            ScoreInputMetric("Monthly Surplus", CurrenciesAndCountries.format(surplus, currency))
+                        ),
+                        contributors = contributors
+                    )
+                )
+                add(
+                    CalculatedValueFact(
+                        id = "V3",
+                        label = "Active goals",
+                        valueFormatted = "${profile.goals.size}",
+                        unit = "goals",
+                        formulaPlainWords = "Count of active targets saved in Goal Planner",
+                        source = "Goal Planner",
+                        inputs = listOf(ScoreInputMetric("Saved Goals", "${profile.goals.size}")),
+                        contributors = contributors.filter { it.destination == ActionTargetDestination.GOAL_PLANNER }
+                    )
+                )
+                if (primaryGoal != null) {
+                    add(
+                        CalculatedValueFact(
+                            id = "V4",
+                            label = "${primaryGoal.name} target",
+                            valueFormatted = CurrenciesAndCountries.format(primaryGoal.targetAmount, currency),
+                            unit = currency,
+                            formulaPlainWords = "Goal target amount set in Goal Planner",
+                            source = "Goal Planner: ${primaryGoal.name}",
+                            inputs = listOf(
+                                ScoreInputMetric("Saved So Far", CurrenciesAndCountries.format(primaryGoal.currentAmount, currency)),
+                                ScoreInputMetric("Goal Target", CurrenciesAndCountries.format(primaryGoal.targetAmount, currency))
+                            ),
+                            contributors = contributors.filter { it.destination == ActionTargetDestination.GOAL_PLANNER }
+                        )
+                    )
+                }
+            }
+            val goalChangeCondition = if (primaryGoal != null) {
+                "Fully fund ${primaryGoal.name} (${CurrenciesAndCountries.format(primaryGoal.targetAmount, currency)})"
+            } else {
+                "Reach target savings across active Goal Planner goals"
+            }
             actions.add(
                 MonthlyActionItem(
                     priority = 1,
@@ -1390,6 +1545,7 @@ object FinancialCalculator {
                     byWhen = "By $nextMonthLabel",
                     actionKey = "${currentMonthKey}_p1_${RuleRegistry.RULE_TOP_GOAL_FUNDING}",
                     ruleId = rule.id,
+                    oneLineSummary = goalSummary,
                     traceability = ActionTraceability(
                         ruleId = rule.id,
                         ruleTitle = rule.title,
@@ -1409,7 +1565,11 @@ object FinancialCalculator {
                             "Goal Planner (${profile.goals.size} goal(s))",
                             "Monthly Cashflow Surplus"
                         ),
-                        contributors = contributors
+                        contributors = contributors,
+                        ruleShortName = rule.shortName,
+                        ruleVersion = rule.version,
+                        calculatedFacts = goalFacts,
+                        whatWouldChangeThis = goalChangeCondition
                     )
                 )
             )
@@ -1428,6 +1588,60 @@ object FinancialCalculator {
                     destination = ActionTargetDestination.DEBT_PLANNER
                 )
             }
+            val debtSummary = "Pay extra debt: ${CurrenciesAndCountries.format(extraDebtAmt, currency)} (${String.format(Locale.US, "%.1f", topDebt?.interestRate ?: 0.0)}% APR on ${CurrenciesAndCountries.format(totalDebt, currency)}) · ${rule.shortName}"
+            val debtFacts = listOf(
+                CalculatedValueFact(
+                    id = "V1",
+                    label = "Total debt",
+                    valueFormatted = CurrenciesAndCountries.format(totalDebt, currency),
+                    unit = currency,
+                    formulaPlainWords = "Sum of remaining balances across all saved debts",
+                    source = "Debt Payoff Planner (${profile.debts.size} debt(s))",
+                    inputs = listOf(
+                        ScoreInputMetric("Total Debt", CurrenciesAndCountries.format(totalDebt, currency)),
+                        ScoreInputMetric("High-APR Balance (>=15%)", CurrenciesAndCountries.format(highRateDebt, currency))
+                    ),
+                    contributors = contributors
+                ),
+                CalculatedValueFact(
+                    id = "V2",
+                    label = "Highest APR",
+                    valueFormatted = "${String.format(Locale.US, "%.1f", topDebt?.interestRate ?: 0.0)}%",
+                    unit = "% APR",
+                    formulaPlainWords = "Maximum annual interest rate across active debts",
+                    source = "Debt Payoff Planner: ${topDebt?.name ?: "Debt"}",
+                    inputs = listOf(
+                        ScoreInputMetric("Top Debt", "${topDebt?.name ?: "Debt"} (${String.format(Locale.US, "%.1f", topDebt?.interestRate ?: 0.0)}%)")
+                    ),
+                    contributors = contributors.take(1)
+                ),
+                CalculatedValueFact(
+                    id = "V3",
+                    label = "Extra payment",
+                    valueFormatted = CurrenciesAndCountries.format(extraDebtAmt, currency),
+                    unit = currency,
+                    formulaPlainWords = "50% of top debt minimum payment (minimum 20)",
+                    source = "High-APR debt rule",
+                    inputs = listOf(
+                        ScoreInputMetric("Top Debt Minimum", CurrenciesAndCountries.format(topDebt?.minimumPayment ?: 0.0, currency))
+                    ),
+                    contributors = contributors.take(1)
+                ),
+                CalculatedValueFact(
+                    id = "V4",
+                    label = "Projected score gain",
+                    valueFormatted = if (delta > 0) "+$delta pts" else "0 pts",
+                    unit = "pts",
+                    formulaPlainWords = "Simulated Money Health Score after extra principal minus current score",
+                    source = "4-pillar Money Health Score",
+                    inputs = listOf(
+                        ScoreInputMetric("Current Score", "$currentScore / 100"),
+                        ScoreInputMetric("Projected Score", "${simulated.totalScore} / 100")
+                    ),
+                    contributors = contributors
+                )
+            )
+            val debtChangeCondition = "Pay total debt down to ${CurrenciesAndCountries.format(0.0, currency)} (clear ${topDebt?.name ?: "balances"})"
             actions.add(
                 MonthlyActionItem(
                     priority = 2,
@@ -1437,6 +1651,7 @@ object FinancialCalculator {
                     byWhen = "By $nextMonthLabel",
                     actionKey = "${currentMonthKey}_p2_${RuleRegistry.RULE_HIGH_APR_DEBT}",
                     ruleId = rule.id,
+                    oneLineSummary = debtSummary,
                     traceability = ActionTraceability(
                         ruleId = rule.id,
                         ruleTitle = rule.title,
@@ -1456,7 +1671,11 @@ object FinancialCalculator {
                             "Cuts interest charges on ${topDebt?.name ?: "debt"} and accelerates your Debt Load score milestone ($currentScore/100)."
                         },
                         dataSources = listOf("Debt Payoff Planner (${profile.debts.size} debt(s))", "Monthly income profile"),
-                        contributors = contributors
+                        contributors = contributors,
+                        ruleShortName = rule.shortName,
+                        ruleVersion = rule.version,
+                        calculatedFacts = debtFacts,
+                        whatWouldChangeThis = debtChangeCondition
                     )
                 )
             )
@@ -1487,6 +1706,66 @@ object FinancialCalculator {
                     }
                 }
             }
+            val trimSummary = "Trim spending: save ${CurrenciesAndCountries.format(trimAmt, currency)}/mo (5% of ${CurrenciesAndCountries.format(typicalSpending, currency)}) · ${rule.shortName}"
+            val trimSource = if (calc.usesSetupSpendingFallback) {
+                "Setup expense categories"
+            } else {
+                "30-day transactions (${calc.recentExpenseTxCount} tx)"
+            }
+            val trimFacts = listOf(
+                CalculatedValueFact(
+                    id = "V1",
+                    label = "Typical monthly spending",
+                    valueFormatted = CurrenciesAndCountries.format(typicalSpending, currency),
+                    unit = currency,
+                    formulaPlainWords = "Sum of 30-day expenses or setup monthly expense baseline",
+                    source = trimSource,
+                    inputs = listOf(
+                        ScoreInputMetric("Typical Monthly Spending", CurrenciesAndCountries.format(typicalSpending, currency))
+                    ),
+                    contributors = contributors
+                ),
+                CalculatedValueFact(
+                    id = "V2",
+                    label = "Suggested monthly trim",
+                    valueFormatted = CurrenciesAndCountries.format(trimAmt, currency),
+                    unit = currency,
+                    formulaPlainWords = "5% of typical monthly spending (minimum 15)",
+                    source = "Spending trim rule",
+                    inputs = listOf(
+                        ScoreInputMetric("Typical Spending", CurrenciesAndCountries.format(typicalSpending, currency))
+                    ),
+                    contributors = contributors
+                ),
+                CalculatedValueFact(
+                    id = "V3",
+                    label = "Current savings rate",
+                    valueFormatted = "${String.format(Locale.US, "%.1f", savingsRate)}%",
+                    unit = "%",
+                    formulaPlainWords = "(Effective income minus typical spending) divided by effective income",
+                    source = "Monthly cashflow",
+                    inputs = listOf(
+                        ScoreInputMetric("Effective Income", CurrenciesAndCountries.format(calc.effectiveIncome, currency)),
+                        ScoreInputMetric("Typical Spending", CurrenciesAndCountries.format(typicalSpending, currency))
+                    ),
+                    contributors = contributors
+                ),
+                CalculatedValueFact(
+                    id = "V4",
+                    label = "Projected score gain",
+                    valueFormatted = if (delta > 0) "+$delta pts" else "0 pts",
+                    unit = "pts",
+                    formulaPlainWords = "Simulated Money Health Score after monthly trim minus current score",
+                    source = "4-pillar Money Health Score",
+                    inputs = listOf(
+                        ScoreInputMetric("Current Score", "$currentScore / 100"),
+                        ScoreInputMetric("Projected Score", "${simulated.totalScore} / 100")
+                    ),
+                    contributors = contributors
+                )
+            )
+            val targetReducedSpend = max(0.0, typicalSpending - trimAmt)
+            val trimChangeCondition = "Lower monthly spending to ${CurrenciesAndCountries.format(targetReducedSpend, currency)}/mo (or lift savings rate to 20%)"
             actions.add(
                 MonthlyActionItem(
                     priority = 2,
@@ -1496,6 +1775,7 @@ object FinancialCalculator {
                     byWhen = "Within 14 days",
                     actionKey = "${currentMonthKey}_p2_${RuleRegistry.RULE_TRIM_SPENDING}",
                     ruleId = rule.id,
+                    oneLineSummary = trimSummary,
                     traceability = ActionTraceability(
                         ruleId = rule.id,
                         ruleTitle = rule.title,
@@ -1517,7 +1797,11 @@ object FinancialCalculator {
                             if (calc.usesSetupSpendingFallback) "Setup expense categories" else "30-day logged/imported transactions (${calc.recentExpenseTxCount} tx)",
                             "Recurring subscription scan"
                         ),
-                        contributors = contributors
+                        contributors = contributors,
+                        ruleShortName = rule.shortName,
+                        ruleVersion = rule.version,
+                        calculatedFacts = trimFacts,
+                        whatWouldChangeThis = trimChangeCondition
                     )
                 )
             )
@@ -1553,6 +1837,40 @@ object FinancialCalculator {
                 )
             }
         }
+        val checkInSummary = "Monthly check-in: ${upcoming30.size} upcoming renewal(s) (reserve ${CurrenciesAndCountries.format(checkInGoalAmt, currency)}) · ${checkInRule.shortName}"
+        val checkInFacts = listOf(
+            CalculatedValueFact(
+                id = "V1",
+                label = "Upcoming 30-day renewals",
+                valueFormatted = "${upcoming30.size}",
+                unit = "items",
+                formulaPlainWords = "Count of unpaid renewals due within the next 30 days",
+                source = "Deadline & Renewal Calendar",
+                inputs = listOf(ScoreInputMetric("Upcoming 30-Day Renewals", "${upcoming30.size} item(s)")),
+                contributors = checkInContributors.filter { it.destination == ActionTargetDestination.CALENDAR }
+            ),
+            CalculatedValueFact(
+                id = "V2",
+                label = "Surprise-bill reserve",
+                valueFormatted = CurrenciesAndCountries.format(checkInGoalAmt, currency),
+                unit = currency,
+                formulaPlainWords = "3% of typical monthly spending (minimum 10)",
+                source = "Monthly check-in rule",
+                inputs = listOf(ScoreInputMetric("Monthly Spending Baseline", CurrenciesAndCountries.format(typicalSpending, currency))),
+                contributors = checkInContributors
+            ),
+            CalculatedValueFact(
+                id = "V3",
+                label = "Monthly spending baseline",
+                valueFormatted = CurrenciesAndCountries.format(typicalSpending, currency),
+                unit = currency,
+                formulaPlainWords = "30-day expense total or setup expense baseline",
+                source = "Monthly Cashflow",
+                inputs = listOf(ScoreInputMetric("Monthly Spending Baseline", CurrenciesAndCountries.format(typicalSpending, currency))),
+                contributors = checkInContributors
+            )
+        )
+        val checkInChangeCondition = "Save $currentMonthKey monthly snapshot & clear ${upcoming30.size} due renewal(s)"
         actions.add(
             MonthlyActionItem(
                 priority = 3,
@@ -1562,6 +1880,7 @@ object FinancialCalculator {
                 byWhen = "By $nextMonthLabel",
                 actionKey = "${currentMonthKey}_p3_${RuleRegistry.RULE_CHECKIN_SNAPSHOT}",
                 ruleId = checkInRule.id,
+                oneLineSummary = checkInSummary,
                 traceability = ActionTraceability(
                     ruleId = checkInRule.id,
                     ruleTitle = checkInRule.title,
@@ -1580,7 +1899,11 @@ object FinancialCalculator {
                         "Deadline & Renewal Calendar",
                         "Net Worth assets & debts"
                     ),
-                    contributors = checkInContributors
+                    contributors = checkInContributors,
+                    ruleShortName = checkInRule.shortName,
+                    ruleVersion = checkInRule.version,
+                    calculatedFacts = checkInFacts,
+                    whatWouldChangeThis = checkInChangeCondition
                 )
             )
         )
@@ -1615,6 +1938,469 @@ object FinancialCalculator {
             currentSnapshot = currentSnapshot,
             tracedScore = tracedScore,
             dataQualityNotes = tracedScore.dataQualityNotes
+        )
+    }
+
+    fun formatCompactMonths(months: Double): String {
+        val rounded = (months * 10.0).roundToInt() / 10.0
+        return if (kotlin.math.abs(rounded - rounded.toInt()) < 0.05) {
+            rounded.toInt().toString()
+        } else {
+            String.format(Locale.US, "%.1f", rounded)
+        }
+    }
+
+    fun resolveActionOneLineSummary(action: MonthlyActionItem): String {
+        if (action.oneLineSummary.isNotBlank()) return action.oneLineSummary
+        val ruleName = action.traceability?.ruleShortName?.ifBlank { null }
+            ?: RuleRegistry.displayRuleName(action.ruleId)
+        val keyNum = action.traceability?.triggeringNumbers?.firstOrNull()?.let {
+            "${it.label}: ${it.valueFormatted}"
+        } ?: action.howMuch
+        return "${action.title}: $keyNum · $ruleName"
+    }
+
+    fun defaultRuleNameForCategory(category: String): String {
+        return when {
+            category.contains("Allocation", ignoreCase = true) -> "Auto-split rule"
+            category.contains("Setting", ignoreCase = true) -> "User settings rule"
+            category.contains("Check-In", ignoreCase = true) -> "Check-in rule"
+            else -> "Manual review rule"
+        }
+    }
+
+    fun buildActivityOneLineSummary(
+        title: String,
+        numbersSummary: String,
+        whatChanged: String,
+        ruleId: String?,
+        category: String
+    ): String {
+        val cleanTitle = title.trim().removeSuffix("?").ifBlank { category }
+        val ruleName = RuleRegistry.displayRuleName(
+            ruleId = ruleId,
+            categoryFallback = defaultRuleNameForCategory(category)
+        )
+        val rawNum = numbersSummary.trim()
+            .ifBlank { whatChanged.trim() }
+            .substringBefore(";")
+            .substringBefore("\n")
+            .trim()
+        val keyNumber = if (rawNum.length > 48) rawNum.take(45).trimEnd() + "..." else rawNum
+        return if (keyNumber.isNotBlank()) {
+            "$cleanTitle: $keyNumber · $ruleName"
+        } else {
+            "$cleanTitle · $ruleName"
+        }
+    }
+
+    fun topAffectingDataQualityNote(notes: List<DataQualityNote>): DataQualityNote? {
+        val low = notes.filter { it.isLowQuality }
+        if (low.isEmpty()) return null
+        return low.firstOrNull { it.id == "dq_no_tx" || it.id == "dq_short_tx" } ?: low.first()
+    }
+
+    fun inferUnitFromFormattedValue(valueFormatted: String, label: String = ""): String {
+        val trimmed = valueFormatted.trim()
+        return when {
+            trimmed.contains("month", ignoreCase = true) || trimmed.contains(" mo", ignoreCase = true) -> "months"
+            trimmed.contains("%") -> "%"
+            trimmed.contains("pt", ignoreCase = true) || trimmed.endsWith("/100") -> "pts"
+            trimmed.contains("item", ignoreCase = true) || label.contains("goal", ignoreCase = true) -> "items"
+            trimmed.any { it.isLetter() } -> {
+                val letters = trimmed.takeWhile { !it.isDigit() && it != '-' }.trim()
+                if (letters.isNotBlank()) letters else "units"
+            }
+            else -> "amount"
+        }
+    }
+
+    fun buildFactsForActivityEntry(
+        title: String,
+        category: String,
+        numbersSummary: String,
+        ruleId: String?,
+        snapshotInputs: List<ScoreInputMetric>,
+        snapshotTotalScore: Int?
+    ): List<CalculatedValueFact> {
+        val ruleDef = ruleId?.let { RuleRegistry.findById(it) }
+        val baseInputs = if (snapshotInputs.isNotEmpty()) {
+            snapshotInputs
+        } else {
+            numbersSummary.split(";").mapNotNull { part ->
+                val clean = part.trim()
+                if (clean.isBlank()) null
+                else if (clean.contains(":")) {
+                    val idx = clean.indexOf(":")
+                    ScoreInputMetric(clean.substring(0, idx).trim(), clean.substring(idx + 1).trim(), "Confirmed snapshot")
+                } else {
+                    ScoreInputMetric("Recorded figure", clean, "Confirmed snapshot")
+                }
+            }
+        }
+        val list = baseInputs.take(6).mapIndexed { index, metric ->
+            CalculatedValueFact(
+                id = "V${index + 1}",
+                label = metric.label.ifBlank { title },
+                valueFormatted = metric.valueFormatted,
+                unit = inferUnitFromFormattedValue(metric.valueFormatted, metric.label),
+                formulaPlainWords = ruleDef?.plainDescription ?: "Value recorded from your confirmed $category entry",
+                source = metric.sourceNote.ifBlank { "Confirmed activity snapshot" },
+                inputs = listOf(metric)
+            )
+        }.toMutableList()
+        if (snapshotTotalScore != null) {
+            list.add(
+                CalculatedValueFact(
+                    id = "V${list.size + 1}",
+                    label = "Money Health Score",
+                    valueFormatted = "$snapshotTotalScore/100",
+                    unit = "pts",
+                    formulaPlainWords = "Sum of Emergency Buffer, Spending, Savings, and Debt pillars",
+                    source = "Money Health Score snapshot",
+                    inputs = listOf(ScoreInputMetric("Money Health Score", "$snapshotTotalScore / 100"))
+                )
+            )
+        }
+        return list
+    }
+
+    fun buildActionFallbackTemplate(action: MonthlyActionItem, facts: List<CalculatedValueFact>): String {
+        val byId = facts.associateBy { it.id }
+        return when (action.ruleId) {
+            RuleRegistry.RULE_BUFFER_FIRST -> {
+                if (byId.containsKey("V1") && byId.containsKey("V2") && byId.containsKey("V4")) {
+                    "Your safety buffer is at {{V1}} toward the {{V2}} target, so adding {{V4}} moves you closer to full coverage. (Educational guidance only.)"
+                } else {
+                    defaultFactsTemplate(action.what, facts)
+                }
+            }
+            RuleRegistry.RULE_TOP_GOAL_FUNDING -> {
+                if (byId.containsKey("V1") && byId.containsKey("V2")) {
+                    "With {{V1}} in monthly surplus, directing {{V2}} toward your top Goal Planner target keeps progress steady without hurting liquidity. (Educational guidance only.)"
+                } else {
+                    defaultFactsTemplate(action.what, facts)
+                }
+            }
+            RuleRegistry.RULE_HIGH_APR_DEBT -> {
+                if (byId.containsKey("V1") && byId.containsKey("V2") && byId.containsKey("V3")) {
+                    "Paying an extra {{V3}} toward debt at {{V2}} helps lower your {{V1}} balance faster and saves on interest. (Educational guidance only.)"
+                } else {
+                    defaultFactsTemplate(action.what, facts)
+                }
+            }
+            RuleRegistry.RULE_TRIM_SPENDING -> {
+                if (byId.containsKey("V1") && byId.containsKey("V2") && byId.containsKey("V3")) {
+                    "Trimming {{V2}} from your {{V1}} monthly spending boosts your {{V3}} savings rate safely. (Educational guidance only.)"
+                } else {
+                    defaultFactsTemplate(action.what, facts)
+                }
+            }
+            RuleRegistry.RULE_CHECKIN_SNAPSHOT -> {
+                if (byId.containsKey("V1") && byId.containsKey("V2")) {
+                    "Reviewing {{V1}} upcoming renewals and keeping a {{V2}} reserve prevents surprise bills from disrupting your plan. (Educational guidance only.)"
+                } else {
+                    defaultFactsTemplate(action.what, facts)
+                }
+            }
+            else -> defaultFactsTemplate(action.what, facts)
+        }
+    }
+
+    fun buildActivityFallbackTemplate(
+        title: String,
+        ruleWording: String,
+        facts: List<CalculatedValueFact>
+    ): String {
+        val cleanWording = ruleWording.replace(Regex("\\d"), "").trim()
+        return if (facts.size >= 2) {
+            "$title recorded with {{${facts[0].id}}} and {{${facts[1].id}}} from your saved figures. ${cleanWording.ifBlank { "Confirmed from stored inputs." }} (Educational guidance only.)"
+        } else if (facts.size == 1) {
+            "$title recorded with {{${facts[0].id}}} from your saved figures. ${cleanWording.ifBlank { "Confirmed from stored inputs." }} (Educational guidance only.)"
+        } else {
+            "$title was confirmed from your stored inputs. (Educational guidance only.)"
+        }
+    }
+
+    private fun defaultFactsTemplate(actionSummary: String, facts: List<CalculatedValueFact>): String {
+        val cleanText = actionSummary.replace(Regex("\\d"), "").trim().ifBlank { "This recommended step uses your stored numbers." }
+        return if (facts.size >= 2) {
+            "$cleanText Key figures checked: {{${facts[0].id}}} and {{${facts[1].id}}}. (Educational guidance only.)"
+        } else if (facts.size == 1) {
+            "$cleanText Key figure checked: {{${facts[0].id}}}. (Educational guidance only.)"
+        } else {
+            "$cleanText (Educational guidance only.)"
+        }
+    }
+
+    private val PLACEHOLDER_REGEX = Regex("\\{\\{([^}]+)\\}\\}")
+    private val DIGIT_REGEX = Regex("\\d")
+
+    fun resolveTemplateToPlainText(
+        templateWithIds: String,
+        facts: List<CalculatedValueFact>
+    ): String {
+        val byId = facts.associateBy { it.id }
+        return PLACEHOLDER_REGEX.replace(templateWithIds) { match ->
+            val id = match.groupValues[1].trim()
+            byId[id]?.valueFormatted ?: match.value
+        }
+    }
+
+    /**
+     * Strictly validates AI output that must refer to calculated facts ONLY via {{V#}} IDs.
+     * Any unknown ID, unbraced/raw digit not inside a valid {{V#}} tag, or missing fact reference
+     * when facts exist triggers blocking and returns the code-built template fallback with note:
+     * "Showing a simple explanation."
+     */
+    fun validateAiReferenceExplanation(
+        rawAiText: String?,
+        facts: List<CalculatedValueFact>,
+        fallbackTemplate: String
+    ): TraceableAiExplanation {
+        fun buildFallback(): TraceableAiExplanation {
+            return TraceableAiExplanation(
+                templateWithIds = fallbackTemplate,
+                plainResolvedText = resolveTemplateToPlainText(fallbackTemplate, facts),
+                facts = facts,
+                isFallback = true,
+                note = "Showing a simple explanation."
+            )
+        }
+
+        val candidate = rawAiText?.trim().orEmpty()
+        if (candidate.isBlank()) return buildFallback()
+
+        val validIds = facts.map { it.id }.toSet()
+        val matches = PLACEHOLDER_REGEX.findAll(candidate).toList()
+        val referencedIds = mutableListOf<String>()
+
+        for (m in matches) {
+            val id = m.groupValues[1].trim()
+            if (!validIds.contains(id)) {
+                return buildFallback()
+            }
+            referencedIds.add(id)
+        }
+
+        if (facts.isNotEmpty() && referencedIds.isEmpty()) {
+            return buildFallback()
+        }
+
+        // Remove all valid {{V#}} placeholders and ensure zero digits remain in the AI-written prose
+        val strippedText = PLACEHOLDER_REGEX.replace(candidate, " ")
+        if (DIGIT_REGEX.containsMatchIn(strippedText)) {
+            return buildFallback()
+        }
+
+        val normalizedTemplate = PLACEHOLDER_REGEX.replace(candidate) { m ->
+            "{{${m.groupValues[1].trim()}}}"
+        }
+        return TraceableAiExplanation(
+            templateWithIds = normalizedTemplate,
+            plainResolvedText = resolveTemplateToPlainText(normalizedTemplate, facts),
+            facts = facts,
+            isFallback = false,
+            note = ""
+        )
+    }
+
+    // === PRIVACY-SAFE SCORE CARD SHARING, ANONYMOUS REFERRALS & MILESTONE BADGES ===
+
+    const val GROWMINT_APP_URL = "https://ais-pre-wt4cpwje43gerrmnerzzuo-428422984777.asia-northeast1.run.app"
+    const val GROWMINT_DEV_APP_URL = "https://ais-dev-wt4cpwje43gerrmnerzzuo-428422984777.asia-northeast1.run.app"
+    const val SCORE_CARD_DISCLAIMER = "Educational tool, not financial advice."
+    const val BADGE_REWARDS_NOTE = "Rewards may change as the app grows."
+
+    private val REF_QUERY_REGEX = Regex("(?i)[?&]ref=([A-Z0-9]{6,12})")
+    private val RAW_REF_CODE_REGEX = Regex("^[A-Z0-9]{6,12}$")
+    private val CURRENCY_OR_SENSITIVE_REGEX = Regex("([$€£¥₹₩₽₦]\\s*\\d[\\d,.]*|\\b\\d{3,}[\\d,.]*\\b|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})")
+
+    fun calculateScoreCardLabel(score: Int): String {
+        val clamped = score.coerceIn(0, 100)
+        return when {
+            clamped >= 85 -> "Excellent"
+            clamped >= 70 -> "Strong"
+            clamped >= 45 -> "Building"
+            else -> "Getting started"
+        }
+    }
+
+    fun calculateComponentLevel(earnedPoints: Int, maxPoints: Int): ScoreCardBarLevel {
+        if (maxPoints <= 0) return ScoreCardBarLevel.LOW
+        val ratio = earnedPoints.toDouble() / maxPoints.toDouble()
+        return when {
+            ratio >= 0.75 -> ScoreCardBarLevel.GOOD
+            ratio >= 0.40 -> ScoreCardBarLevel.OKAY
+            else -> ScoreCardBarLevel.LOW
+        }
+    }
+
+    private fun shortComponentBarName(rawName: String): String {
+        return when {
+            rawName.contains("Buffer", ignoreCase = true) -> "Emergency Buffer"
+            rawName.contains("Spend", ignoreCase = true) -> "Spending Control"
+            rawName.contains("Saving", ignoreCase = true) -> "Savings Habit"
+            rawName.contains("Debt", ignoreCase = true) -> "Debt Load"
+            else -> rawName.take(20)
+        }
+    }
+
+    fun sanitizeNicknameForShareCard(raw: String): String {
+        val noSensitive = CURRENCY_OR_SENSITIVE_REGEX.replace(raw, "")
+        val cleaned = noSensitive
+            .replace(Regex("[\\d@$€£¥₹₩₽₦\\r\\n]"), "")
+            .trim()
+        return cleaned.take(20)
+    }
+
+    fun formatMonthDeltaForCard(delta: Int): String {
+        return when {
+            delta > 0 -> "+$delta this month"
+            delta < 0 -> "$delta this month"
+            else -> "0 this month"
+        }
+    }
+
+    fun buildPrivacySafeScoreCardData(
+        report: MonthlyImprovementReport,
+        isUnder18: Boolean,
+        requestedShowMonthlyChange: Boolean = false,
+        requestedShowComponentBars: Boolean = false,
+        requestedShowNickname: Boolean = false,
+        requestedNickname: String = "",
+        style: ScoreCardThemeStyle = ScoreCardThemeStyle.DAY
+    ): ScoreCardData {
+        val clampedScore = report.currentScore.coerceIn(0, 100)
+        val hasPreviousScore = report.previousScore != null
+        val monthDelta = if (hasPreviousScore) report.scoreDelta else null
+
+        val tracedComponents = report.tracedScore?.components.orEmpty()
+        val bars = if (tracedComponents.isNotEmpty()) {
+            tracedComponents.take(4).map { comp ->
+                ScoreCardComponentBar(
+                    name = shortComponentBarName(comp.name),
+                    level = calculateComponentLevel(comp.earnedPoints, comp.maxPoints)
+                )
+            }
+        } else {
+            report.pillarBreakdown.take(4).map { pillar ->
+                ScoreCardComponentBar(
+                    name = shortComponentBarName(pillar.category),
+                    level = calculateComponentLevel(pillar.earnedPoints, pillar.maxPoints)
+                )
+            }
+        }
+
+        // Guided Mode (<18): enforce strict private defaults (no nickname, no bars, no external sharing)
+        val effectiveShowChange = if (isUnder18) false else (requestedShowMonthlyChange && monthDelta != null)
+        val effectiveShowBars = if (isUnder18) false else requestedShowComponentBars
+        val effectiveNickname = if (isUnder18) "" else sanitizeNicknameForShareCard(requestedNickname)
+        val effectiveShowNickname = if (isUnder18) false else (requestedShowNickname && effectiveNickname.isNotBlank())
+
+        return ScoreCardData(
+            score = clampedScore,
+            scoreLabel = calculateScoreCardLabel(clampedScore),
+            monthDelta = monthDelta,
+            componentBars = bars,
+            nickname = effectiveNickname,
+            showMonthlyChange = effectiveShowChange,
+            showComponentBars = effectiveShowBars,
+            showNickname = effectiveShowNickname,
+            style = style,
+            footerDisclaimer = SCORE_CARD_DISCLAIMER,
+            appUrl = GROWMINT_APP_URL
+        )
+    }
+
+    fun isValidReferralCodeFormat(code: String?): Boolean {
+        val clean = code?.trim()?.uppercase(Locale.US).orEmpty()
+        return RAW_REF_CODE_REGEX.matches(clean)
+    }
+
+    fun parseReferralCodeFromUriOrText(raw: String?): String? {
+        val trimmed = raw?.trim().orEmpty()
+        if (trimmed.isBlank()) return null
+        val queryMatch = REF_QUERY_REGEX.find(trimmed)
+        if (queryMatch != null) {
+            return queryMatch.groupValues[1].uppercase(Locale.US)
+        }
+        val upper = trimmed.uppercase(Locale.US)
+        return if (RAW_REF_CODE_REGEX.matches(upper)) upper else null
+    }
+
+    fun buildReferralLink(code: String?): String {
+        val clean = code?.trim()?.uppercase(Locale.US)
+        return if (!clean.isNullOrBlank() && isValidReferralCodeFormat(clean)) {
+            "$GROWMINT_APP_URL?ref=$clean"
+        } else {
+            GROWMINT_APP_URL
+        }
+    }
+
+    fun sanitizeInviteMessage(raw: String): String {
+        val cleaned = CURRENCY_OR_SENSITIVE_REGEX.replace(raw, "").replace(Regex("\\s{2,}"), " ").trim()
+        return if (cleaned.isBlank()) ReferralState.DEFAULT_INVITE_MESSAGE else cleaned.take(220)
+    }
+
+    fun buildPrivacySafeShareText(
+        card: ScoreCardData,
+        includeReferralLink: Boolean,
+        referralCode: String?
+    ): String {
+        val parts = mutableListOf<String>()
+        val header = if (card.showNickname && card.nickname.isNotBlank()) {
+            "${card.nickname}'s GrowMint Money Health Score: ${card.score}/100 (${card.scoreLabel})."
+        } else {
+            "My GrowMint Money Health Score: ${card.score}/100 (${card.scoreLabel})."
+        }
+        parts.add(header)
+        if (card.showMonthlyChange && card.monthDelta != null) {
+            parts.add("Progress: ${formatMonthDeltaForCard(card.monthDelta)}.")
+        }
+        val url = if (includeReferralLink) buildReferralLink(referralCode) else GROWMINT_APP_URL
+        parts.add(card.footerDisclaimer)
+        parts.add(url)
+        return parts.joinToString(" ")
+    }
+
+    fun calculateMilestoneBadges(
+        referralCount: Int,
+        currentScore: Int,
+        monthlySnapshotsCount: Int
+    ): List<MilestoneBadge> {
+        val safeRefs = maxOf(0, referralCount)
+        val safeScore = currentScore.coerceIn(0, 100)
+        val safeMonths = maxOf(0, monthlySnapshotsCount)
+        return listOf(
+            MilestoneBadge(
+                id = "first_invite",
+                title = "First invite",
+                description = "Shared GrowMint and had your first friend complete setup.",
+                isUnlocked = safeRefs >= 1,
+                progressText = "${minOf(safeRefs, 1)}/1 invite"
+            ),
+            MilestoneBadge(
+                id = "three_friends_joined",
+                title = "3 friends joined",
+                description = "Helped 3 friends start building steadier money habits.",
+                isUnlocked = safeRefs >= 3,
+                progressText = "${minOf(safeRefs, 3)}/3 invites"
+            ),
+            MilestoneBadge(
+                id = "score_70_plus",
+                title = "Score 70+",
+                description = "Reached a Money Health Score of 70 or higher.",
+                isUnlocked = safeScore >= 70,
+                progressText = "$safeScore/70 score"
+            ),
+            MilestoneBadge(
+                id = "three_month_streak",
+                title = "3-month streak",
+                description = "Tracked monthly Money Health snapshots for 3 months.",
+                isUnlocked = safeMonths >= 3,
+                progressText = "${minOf(safeMonths, 3)}/3 months"
+            )
         )
     }
 }

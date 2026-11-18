@@ -36,6 +36,8 @@ import com.example.ui.theme.*
 fun OnboardingScreen(
     initialProfile: UserProfile,
     onComplete: (UserProfile, Boolean) -> Unit,
+    pendingReferralCode: String? = null,
+    onInviteCodeChange: (String?) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var step by remember { mutableIntStateOf(0) }
@@ -262,7 +264,9 @@ fun OnboardingScreen(
                             selectedIncomeType = IncomeType.IRREGULAR
                             isIrregularIncome = true
                         }
-                    }
+                    },
+                    pendingReferralCode = pendingReferralCode,
+                    onInviteCodeChange = onInviteCodeChange
                 )
                 1 -> StepCurrencyAndCountry(
                     selectedCurrency = selectedCurrency,
@@ -421,7 +425,9 @@ private fun StepWelcomeNotice(
     isStudentMode: Boolean,
     onStudentModeChange: (Boolean) -> Unit,
     userSituation: String,
-    onSituationChange: (String) -> Unit
+    onSituationChange: (String) -> Unit,
+    pendingReferralCode: String? = null,
+    onInviteCodeChange: (String?) -> Unit = {}
 ) {
     val lifeStages = LifeStage.values().toList()
     Column(
@@ -563,6 +569,50 @@ private fun StepWelcomeNotice(
         Spacer(modifier = Modifier.height(16.dp))
 
         VirtualLedgerNoticeCard()
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        var manualCodeInput by remember(pendingReferralCode) { mutableStateOf(pendingReferralCode.orEmpty()) }
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("onboarding_referral_card"),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "Have an invite code? (Optional)",
+                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
+                )
+                if (!pendingReferralCode.isNullOrBlank()) {
+                    Text(
+                        text = "Invite code detected: $pendingReferralCode • Counts anonymously after you complete setup & eligibility check.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MintPrimary,
+                        modifier = Modifier.testTag("onboarding_detected_ref_text")
+                    )
+                } else {
+                    Text(
+                        text = "Only the referral count is updated after setup. No personal details are stored, and eligibility rules still apply.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                OutlinedTextField(
+                    value = manualCodeInput,
+                    onValueChange = { raw ->
+                        manualCodeInput = raw.uppercase()
+                        onInviteCodeChange(raw.trim().ifBlank { null })
+                    },
+                    label = { Text("Friend's invite code or link (optional)") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("onboarding_referral_code_input")
+                )
+            }
+        }
 
         Spacer(modifier = Modifier.height(16.dp))
 

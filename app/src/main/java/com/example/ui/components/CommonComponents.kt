@@ -24,11 +24,18 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Flag
+import androidx.compose.material.icons.filled.Functions
+import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.ui.text.style.TextOverflow
+import com.example.model.ActionTargetDestination
+import com.example.model.CalculatedValueFact
 import com.example.model.CurrenciesAndCountries
 import com.example.model.DataQualityNote
 import com.example.ui.theme.*
@@ -390,6 +397,7 @@ fun ConfirmActionDialog(
     ruleId: String? = null,
     activityCategory: String = "Confirmed Change",
     requireReviewCheck: Boolean = true,
+    skipActivityLog: Boolean = false,
     onConfirm: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -495,10 +503,12 @@ fun ConfirmActionDialog(
         confirmButton = {
             Button(
                 onClick = {
-                    val cleanWhat = summaryLines.joinToString("; ")
-                    val cleanWhy = whyText?.ifBlank { "Reviewed and approved by user" } ?: "Reviewed and approved by user"
-                    val cleanNums = backingNumbers ?: summaryLines.firstOrNull().orEmpty()
-                    activityLogger?.invoke(activityCategory, title, cleanWhat, cleanWhy, cleanNums, ruleId)
+                    if (!skipActivityLog) {
+                        val cleanWhat = summaryLines.joinToString("; ")
+                        val cleanWhy = whyText?.ifBlank { "Reviewed and approved by user" } ?: "Reviewed and approved by user"
+                        val cleanNums = backingNumbers ?: summaryLines.firstOrNull().orEmpty()
+                        activityLogger?.invoke(activityCategory, title, cleanWhat, cleanWhy, cleanNums, ruleId)
+                    }
                     onConfirm()
                 },
                 enabled = !requireReviewCheck || reviewedChecked,
@@ -780,6 +790,471 @@ fun ReportErrorDialog(
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
+}
+
+// === TOP-LEVEL DATA-QUALITY WARNING CHIP (ONLY SHOWN WHEN DATA QUALITY AFFECTS RESULT) ===
+@Composable
+fun TopLevelDataQualityWarning(
+    notes: List<DataQualityNote>,
+    modifier: Modifier = Modifier,
+    testTag: String = "top_level_dq_warning"
+) {
+    val warningNote = remember(notes) {
+        val low = notes.filter { it.isLowQuality }
+        low.firstOrNull { it.id == "dq_no_tx" || it.id == "dq_short_tx" } ?: low.firstOrNull()
+    } ?: return
+
+    var showDetail by remember { mutableStateOf(false) }
+
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = MintAccentGold.copy(alpha = 0.16f),
+        modifier = modifier
+            .clip(RoundedCornerShape(8.dp))
+            .clickable { showDetail = true }
+            .testTag(testTag)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Default.WarningAmber,
+                contentDescription = "Data quality note",
+                tint = MintAccentGold,
+                modifier = Modifier.size(13.dp)
+            )
+            Spacer(modifier = Modifier.width(4.dp))
+            Text(
+                text = warningNote.label,
+                style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp, fontWeight = FontWeight.SemiBold),
+                color = MintAccentGold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+
+    if (showDetail) {
+        AlertDialog(
+            onDismissRequest = { showDetail = false },
+            title = { Text(warningNote.label, fontWeight = FontWeight.Bold) },
+            text = { Text(warningNote.detail, style = MaterialTheme.typography.bodyMedium) },
+            confirmButton = {
+                TextButton(onClick = { showDetail = false }) { Text("Got it") }
+            }
+        )
+    }
+}
+
+// === SCANNABLE LABELED ROW ===
+@Composable
+fun ScannableLabelValueRow(
+    label: String,
+    value: String,
+    valueColor: Color = MaterialTheme.colorScheme.onSurface,
+    maxLines: Int = 1,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.Top
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(end = 10.dp)
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold),
+            color = valueColor,
+            maxLines = maxLines,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false)
+        )
+    }
+}
+
+// === "EXPLAIN IT TO ME" CHECK: DID THIS MAKE SENSE? (YES / NOT REALLY) ===
+@Composable
+fun ExplanationSenseCheckRow(
+    currentAnswer: Boolean?,
+    onSelectAnswer: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+    yesTag: String = "sense_check_yes_btn",
+    noTag: String = "sense_check_no_btn"
+) {
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = MaterialTheme.colorScheme.surface,
+        modifier = modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Did this make sense?",
+                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                if (currentAnswer != null) {
+                    Text(
+                        text = if (currentAnswer) "Saved: Yes" else "Saved: Not really",
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                        color = if (currentAnswer) FinanceGreen else MintAccentGold
+                    )
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                FilterChip(
+                    selected = currentAnswer == true,
+                    onClick = { onSelectAnswer(true) },
+                    label = { Text("Yes", fontWeight = FontWeight.SemiBold) },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = FinanceGreen.copy(alpha = 0.18f),
+                        selectedLabelColor = FinanceGreen
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .defaultMinSize(minHeight = 48.dp)
+                        .testTag(yesTag)
+                )
+                FilterChip(
+                    selected = currentAnswer == false,
+                    onClick = { onSelectAnswer(false) },
+                    label = { Text("Not really", fontWeight = FontWeight.SemiBold) },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = MintAccentGold.copy(alpha = 0.2f),
+                        selectedLabelColor = MintAccentGold
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .defaultMinSize(minHeight = 48.dp)
+                        .testTag(noTag)
+                )
+            }
+        }
+    }
+}
+
+private sealed interface ExplanationSegment {
+    data class Word(val text: String) : ExplanationSegment
+    data class FactChip(val fact: CalculatedValueFact, val trailingPunct: String) : ExplanationSegment
+}
+
+private val EXPLANATION_CHIP_TOKEN_REGEX = Regex("\\{\\{([^}]+)\\}\\}([.,;:!?)\\]]*)")
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun TraceableExplanationTextWithChips(
+    templateWithIds: String,
+    facts: List<CalculatedValueFact>,
+    isFallback: Boolean = false,
+    fallbackNote: String = "",
+    onNavigateDestination: ((ActionTargetDestination) -> Unit)? = null,
+    modifier: Modifier = Modifier,
+    testTagPrefix: String = "trace_exp"
+) {
+    val factsById = remember(facts) { facts.associateBy { it.id } }
+    var selectedFact by remember { mutableStateOf<CalculatedValueFact?>(null) }
+
+    val segments = remember(templateWithIds, factsById) {
+        buildList {
+            var cursor = 0
+            val matches = EXPLANATION_CHIP_TOKEN_REGEX.findAll(templateWithIds)
+            for (match in matches) {
+                if (match.range.first > cursor) {
+                    val textBefore = templateWithIds.substring(cursor, match.range.first)
+                    textBefore.trim().split(Regex("\\s+")).filter { it.isNotBlank() }.forEach { w ->
+                        add(ExplanationSegment.Word(w))
+                    }
+                }
+                val id = match.groupValues[1].trim()
+                val punct = match.groupValues[2]
+                val fact = factsById[id]
+                if (fact != null) {
+                    add(ExplanationSegment.FactChip(fact, punct))
+                } else {
+                    add(ExplanationSegment.Word(match.value))
+                }
+                cursor = match.range.last + 1
+            }
+            if (cursor < templateWithIds.length) {
+                val tail = templateWithIds.substring(cursor)
+                tail.trim().split(Regex("\\s+")).filter { it.isNotBlank() }.forEach { w ->
+                    add(ExplanationSegment.Word(w))
+                }
+            }
+        }
+    }
+
+    Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        if (segments.isEmpty()) {
+            Text(
+                text = templateWithIds,
+                style = MaterialTheme.typography.bodySmall
+            )
+        } else {
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                segments.forEach { segment ->
+                    when (segment) {
+                        is ExplanationSegment.Word -> {
+                            Box(
+                                modifier = Modifier.defaultMinSize(minHeight = 28.dp),
+                                contentAlignment = Alignment.CenterStart
+                            ) {
+                                Text(
+                                    text = segment.text,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        }
+                        is ExplanationSegment.FactChip -> {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = MintPrimary.copy(alpha = 0.14f),
+                                    border = BorderStroke(1.dp, MintPrimary.copy(alpha = 0.45f)),
+                                    modifier = Modifier
+                                        .defaultMinSize(minHeight = 28.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .clickable { selectedFact = segment.fact }
+                                        .testTag("${testTagPrefix}_chip_${segment.fact.id}")
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = segment.fact.valueFormatted,
+                                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                            color = MintPrimary
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Icon(
+                                            imageVector = Icons.Default.Info,
+                                            contentDescription = "Inspect ${segment.fact.label}",
+                                            tint = MintPrimary,
+                                            modifier = Modifier.size(12.dp)
+                                        )
+                                    }
+                                }
+                                if (segment.trailingPunct.isNotBlank()) {
+                                    Text(
+                                        text = segment.trailingPunct,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (isFallback && fallbackNote.isNotBlank()) {
+            Text(
+                text = fallbackNote,
+                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Medium),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag("${testTagPrefix}_fallback_note")
+            )
+        }
+    }
+
+    selectedFact?.let { fact ->
+        CalculatedFactDetailDialog(
+            fact = fact,
+            onNavigateDestination = onNavigateDestination,
+            onDismiss = { selectedFact = null }
+        )
+    }
+}
+
+@Composable
+fun CalculatedFactDetailDialog(
+    fact: CalculatedValueFact,
+    onNavigateDestination: ((ActionTargetDestination) -> Unit)? = null,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Functions, contentDescription = null, tint = MintPrimary)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "${fact.label} (${fact.id})",
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 420.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = MintPrimary.copy(alpha = 0.12f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        ScannableLabelValueRow(
+                            label = "Calculated value",
+                            value = fact.valueFormatted,
+                            valueColor = MintPrimary,
+                            maxLines = 2
+                        )
+                        if (fact.unit.isNotBlank()) {
+                            ScannableLabelValueRow(
+                                label = "Unit",
+                                value = fact.unit
+                            )
+                        }
+                    }
+                }
+
+                if (fact.formulaPlainWords.isNotBlank()) {
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(
+                            text = "Formula (plain words)",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = fact.formulaPlainWords,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+
+                if (fact.source.isNotBlank()) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Storage, contentDescription = null, tint = MintPrimary, modifier = Modifier.size(14.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Source: ${fact.source}",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold)
+                        )
+                    }
+                }
+
+                if (fact.inputs.isNotEmpty()) {
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                text = "Inputs Used",
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            fact.inputs.forEach { metric ->
+                                ScannableLabelValueRow(
+                                    label = metric.label,
+                                    value = metric.valueFormatted,
+                                    maxLines = 2
+                                )
+                            }
+                        }
+                    }
+                }
+
+                if (fact.contributors.isNotEmpty()) {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(
+                            text = "Entries & Transactions Behind This",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        fact.contributors.forEachIndexed { idx, item ->
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .defaultMinSize(minHeight = 48.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .then(
+                                        if (onNavigateDestination != null) {
+                                            Modifier.clickable {
+                                                onDismiss()
+                                                onNavigateDestination(item.destination)
+                                            }
+                                        } else Modifier
+                                    )
+                                    .testTag("fact_contributor_link_$idx")
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(10.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = item.label,
+                                            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold)
+                                        )
+                                        Text(
+                                            text = item.detail,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        if (onNavigateDestination != null) {
+                                            Text(
+                                                text = item.destination.label,
+                                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                                color = MintPrimary
+                                            )
+                                        }
+                                    }
+                                    if (onNavigateDestination != null) {
+                                        Icon(
+                                            imageVector = Icons.Default.ChevronRight,
+                                            contentDescription = item.destination.label,
+                                            tint = MintPrimary
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Close") }
         }
     )
 }

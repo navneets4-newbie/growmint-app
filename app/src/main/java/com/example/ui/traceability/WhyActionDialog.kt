@@ -17,8 +17,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.ai.AiCoachManager
+import com.example.data.FinancialCalculator
 import com.example.model.*
 import com.example.ui.components.DataQualityBadgeRow
+import com.example.ui.components.ExplanationSenseCheckRow
+import com.example.ui.components.ScannableLabelValueRow
+import com.example.ui.components.TraceableExplanationTextWithChips
 import com.example.ui.theme.FinanceGreen
 import com.example.ui.theme.FinanceRed
 import com.example.ui.theme.MintAccentGold
@@ -30,18 +34,21 @@ fun WhyActionDialog(
     profile: UserProfile,
     dataQualityNotes: List<DataQualityNote>,
     coachManager: AiCoachManager,
+    scoreComponents: List<ScoreComponentDetail> = emptyList(),
+    explanationFeedbackAnswer: Boolean? = null,
+    onSubmitExplanationFeedback: (Boolean) -> Unit = {},
     onNavigateDestination: (ActionTargetDestination) -> Unit,
     onOpenHowDecides: () -> Unit,
     onFlagError: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val trace = action.traceability
-    var plainEnglishNote by remember(action.actionKey) { mutableStateOf<String?>(null) }
+    var traceableExplanation by remember(action.actionKey) { mutableStateOf<TraceableAiExplanation?>(null) }
     var isExplaining by remember(action.actionKey) { mutableStateOf(true) }
 
     LaunchedEffect(action.actionKey) {
         isExplaining = true
-        plainEnglishNote = coachManager.explainActionPlainLanguage(action, profile)
+        traceableExplanation = coachManager.explainActionTraceable(action, profile)
         isExplaining = false
     }
 
@@ -84,10 +91,16 @@ fun WhyActionDialog(
                     color = MaterialTheme.colorScheme.primary
                 )
 
+                Text(
+                    text = FinancialCalculator.resolveActionOneLineSummary(action),
+                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold),
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+
                 DataQualityBadgeRow(notes = dataQualityNotes)
 
                 if (trace != null) {
-                    // (a) Rule ID & description
+                    // (a) Rule ID, wording & version
                     Surface(
                         color = MintPrimary.copy(alpha = 0.12f),
                         shape = RoundedCornerShape(10.dp),
@@ -100,7 +113,7 @@ fun WhyActionDialog(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
-                                    text = "RULE: ${trace.ruleId}",
+                                    text = "${trace.ruleId} · ${trace.ruleVersion}",
                                     style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.ExtraBold),
                                     color = MintPrimary
                                 )
@@ -124,6 +137,13 @@ fun WhyActionDialog(
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
+                            if (trace.whatWouldChangeThis.isNotBlank()) {
+                                Text(
+                                    text = "What would change this? ${trace.whatWouldChangeThis}",
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                                    color = MintPrimary
+                                )
+                            }
                         }
                     }
 
@@ -259,6 +279,28 @@ fun WhyActionDialog(
                     }
                 }
 
+                if (scoreComponents.isNotEmpty()) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(
+                                text = "Score Components Snapshot",
+                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            scoreComponents.forEach { comp ->
+                                ScannableLabelValueRow(
+                                    label = "${comp.name} (${comp.weightPercent}%)",
+                                    value = "${comp.earnedPoints}/${comp.maxPoints} pts"
+                                )
+                            }
+                        }
+                    }
+                }
+
                 // Plain-English AI explanation strictly grounded in code output
                 Surface(
                     color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.4f),
@@ -278,13 +320,35 @@ fun WhyActionDialog(
                                 Text("Summarizing stored rule facts...", style = MaterialTheme.typography.bodySmall)
                             }
                         } else {
-                            Text(
-                                text = plainEnglishNote.orEmpty(),
-                                style = MaterialTheme.typography.bodySmall
-                            )
+                            val exp = traceableExplanation
+                            if (exp != null) {
+                                TraceableExplanationTextWithChips(
+                                    templateWithIds = exp.templateWithIds,
+                                    facts = exp.facts,
+                                    isFallback = exp.isFallback,
+                                    fallbackNote = exp.note,
+                                    onNavigateDestination = { dest ->
+                                        onDismiss()
+                                        onNavigateDestination(dest)
+                                    },
+                                    testTagPrefix = "why_dialog_trace"
+                                )
+                            } else {
+                                Text(
+                                    text = action.what,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
                         }
                     }
                 }
+
+                ExplanationSenseCheckRow(
+                    currentAnswer = explanationFeedbackAnswer,
+                    onSelectAnswer = onSubmitExplanationFeedback,
+                    yesTag = "why_dialog_sense_yes",
+                    noTag = "why_dialog_sense_no"
+                )
             }
         },
         confirmButton = {

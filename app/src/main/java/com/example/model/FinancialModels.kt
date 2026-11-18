@@ -497,7 +497,8 @@ data class MonthlyActionItem(
     val byWhen: String,
     val actionKey: String = "action_$priority",
     val ruleId: String = "",
-    val traceability: ActionTraceability? = null
+    val traceability: ActionTraceability? = null,
+    val oneLineSummary: String = ""
 )
 
 data class MonthlyImprovementReport(
@@ -524,7 +525,9 @@ data class RuleDefinition(
     val title: String,
     val category: String, // "Score Component", "Recommended Action", "Safety Guardrail"
     val plainDescription: String,
-    val triggerCondition: String
+    val triggerCondition: String,
+    val shortName: String = title,
+    val version: String = "v1.0"
 )
 
 data class ScoreInputMetric(
@@ -577,6 +580,25 @@ data class ActionContributorItem(
     val destination: ActionTargetDestination
 )
 
+data class CalculatedValueFact(
+    val id: String, // e.g., "V1", "V2"
+    val label: String,
+    val valueFormatted: String,
+    val unit: String = "",
+    val formulaPlainWords: String = "",
+    val source: String = "",
+    val inputs: List<ScoreInputMetric> = emptyList(),
+    val contributors: List<ActionContributorItem> = emptyList()
+)
+
+data class TraceableAiExplanation(
+    val templateWithIds: String,
+    val plainResolvedText: String,
+    val facts: List<CalculatedValueFact> = emptyList(),
+    val isFallback: Boolean = false,
+    val note: String = ""
+)
+
 data class ActionTraceability(
     val ruleId: String,
     val ruleTitle: String,
@@ -587,7 +609,11 @@ data class ActionTraceability(
     val projectedNewScore: Int,
     val expectedScoreExplanation: String,
     val dataSources: List<String>,
-    val contributors: List<ActionContributorItem>
+    val contributors: List<ActionContributorItem>,
+    val ruleShortName: String = ruleTitle,
+    val ruleVersion: String = "v1.0",
+    val calculatedFacts: List<CalculatedValueFact> = emptyList(),
+    val whatWouldChangeThis: String = ""
 )
 
 data class ScoreHistorySnapshot(
@@ -634,7 +660,32 @@ data class ActivityHistoryEntry(
     val whatChanged: String,
     val whySummary: String = "",
     val numbersSummary: String = "",
-    val ruleId: String? = null
+    val ruleId: String? = null,
+    val oneLineSummary: String = "",
+    val ruleName: String = "",
+    val ruleWording: String = "",
+    val ruleVersion: String = "v1.0",
+    val snapshotTotalScore: Int? = null,
+    val snapshotInputs: List<ScoreInputMetric> = emptyList(),
+    val snapshotScoreComponents: List<ScoreComponentDetail> = emptyList(),
+    val aiExplanation: String = "",
+    val dataQualityNotes: List<DataQualityNote> = emptyList(),
+    val snapshotCalculatedFacts: List<CalculatedValueFact> = emptyList(),
+    val aiExplanationTemplate: String = "",
+    val aiExplanationIsFallback: Boolean = false,
+    val aiExplanationNote: String = "",
+    val whatWouldChangeThis: String = ""
+)
+
+data class ExplanationFeedbackEntry(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val targetId: String,
+    val targetType: String, // "ACTION", "ACTIVITY_ENTRY"
+    val targetTitle: String,
+    val summaryShown: String,
+    val ruleId: String? = null,
+    val madeSense: Boolean, // true = "Yes", false = "Not really"
+    val timestamp: Long = System.currentTimeMillis()
 )
 
 data class ErrorFlagEntry(
@@ -731,6 +782,68 @@ data class ImportBatchRecord(
     val incomeTotal: Double,
     val expenseTotal: Double,
     val sourceType: String // "PASTE" or "CSV"
+)
+
+// === PRIVACY-SAFE SCORE CARD SHARING, ANONYMOUS REFERRALS & MILESTONE BADGES ===
+
+enum class ScoreCardThemeStyle(val label: String) {
+    DAY("Day"),
+    NIGHT("Night")
+}
+
+enum class ScoreCardBarLevel(val label: String, val fillFraction: Float) {
+    LOW("Low", 0.34f),
+    OKAY("Okay", 0.67f),
+    GOOD("Good", 1.0f)
+}
+
+data class ScoreCardComponentBar(
+    val name: String,
+    val level: ScoreCardBarLevel
+)
+
+data class ScoreCardData(
+    val score: Int,
+    val scoreLabel: String, // "Getting started", "Building", "Strong", "Excellent"
+    val monthDelta: Int?, // null when no previous score exists
+    val componentBars: List<ScoreCardComponentBar>, // up to 4 bars, level only (Low / Okay / Good)
+    val nickname: String = "",
+    val showMonthlyChange: Boolean = false,
+    val showComponentBars: Boolean = false,
+    val showNickname: Boolean = false,
+    val style: ScoreCardThemeStyle = ScoreCardThemeStyle.DAY,
+    val footerDisclaimer: String = "Educational tool, not financial advice.",
+    val appUrl: String = "https://ais-pre-wt4cpwje43gerrmnerzzuo-428422984777.asia-northeast1.run.app"
+)
+
+enum class ReferralAttributionResult {
+    NONE,
+    CREDITED,
+    SELF_REFERRAL_BLOCKED,
+    DUPLICATE_BLOCKED,
+    INVALID_CODE
+}
+
+data class ReferralState(
+    val myReferralCode: String? = null,
+    val referralCount: Int = 0,
+    val sharingEnabled: Boolean = true,
+    val pendingInboundRefCode: String? = null,
+    val hasRedeemedReferral: Boolean = false,
+    val customInviteMessage: String = DEFAULT_INVITE_MESSAGE
+) {
+    companion object {
+        const val DEFAULT_INVITE_MESSAGE =
+            "I've been building healthier money habits with GrowMint, an educational money coach. Try it out:"
+    }
+}
+
+data class MilestoneBadge(
+    val id: String,
+    val title: String,
+    val description: String,
+    val isUnlocked: Boolean,
+    val progressText: String
 )
 
 

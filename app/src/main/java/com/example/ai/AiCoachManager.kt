@@ -915,46 +915,153 @@ class AiCoachManager {
         }
     }
 
-    suspend fun explainActionPlainLanguage(
+    suspend fun explainActionTraceable(
         action: MonthlyActionItem,
         profile: UserProfile
-    ): String {
+    ): TraceableAiExplanation {
         val trace = action.traceability
-        val fallback = if (trace != null) {
-            "Rule ${trace.ruleId} triggered because ${trace.ruleDescription.replaceFirstChar { it.lowercase() }} ${trace.expectedScoreExplanation} (Educational guidance only.)"
-        } else {
-            "${action.what} Target: ${action.howMuch}. (Educational guidance only.)"
+        val facts = trace?.calculatedFacts?.ifEmpty {
+            FinancialCalculator.buildFactsForActivityEntry(
+                title = action.title,
+                category = "Recommended Action",
+                numbersSummary = trace.triggeringNumbers.joinToString("; ") { "${it.label}: ${it.valueFormatted}" },
+                ruleId = action.ruleId,
+                snapshotInputs = trace.triggeringNumbers,
+                snapshotTotalScore = null
+            )
+        } ?: emptyList()
+
+        val fallbackTemplate = FinancialCalculator.buildActionFallbackTemplate(action, facts)
+        if (facts.isEmpty()) {
+            return FinancialCalculator.validateAiReferenceExplanation(null, facts, fallbackTemplate)
         }
 
-        if (trace == null) return fallback
-
-        val factsText = trace.triggeringNumbers.joinToString("; ") { "${it.label}: ${it.valueFormatted}" }
+        val factsBlock = facts.joinToString("\n") { fact ->
+            val unitSuffix = if (fact.unit.isNotBlank()) " (${fact.unit})" else ""
+            "- ${fact.id}: ${fact.label} = ${fact.valueFormatted}$unitSuffix | formula: ${fact.formulaPlainWords} | source: ${fact.source}"
+        }
+        val cleanRuleWording = (trace?.ruleDescription ?: action.what).replace(Regex("\\d"), "").trim()
         val prompt = """
-            You are GrowMint Coach. Write 1 to 2 concise, calm, plain-English sentences explaining why this recommended action makes sense for a ${profile.userSituation} (${profile.incomeType.label} income).
+            You are GrowMint Coach. Write one or two concise, calm, plain-English sentences explaining why this recommended step matters for a ${profile.userSituation} (${profile.incomeType.label} income).
 
-            STRICT RULES:
-            - All numbers below were computed by app code. Do NOT invent, recalculate, round differently, or estimate any new figures.
-            - Explain the cause-and-effect in everyday words.
-            - End with "(Educational guidance only.)"
+            CRITICAL REFERENCE-ONLY RULES:
+            - You MUST refer to every figure ONLY by its placeholder ID inside double curly braces, such as {{V1}} or {{V2}}.
+            - NEVER write any digit, number, percentage, currency symbol, or count directly in your text.
+            - NEVER invent, round, or mention any number that is not in the Calculated Facts list below.
+            - End your response with: (Educational guidance only.)
 
-            Code Facts:
-            - Action: ${action.title} (${action.howMuch}, ${action.byWhen})
-            - Rule ID: ${trace.ruleId} (${trace.ruleTitle})
-            - Rule Logic: ${trace.ruleDescription}
-            - Inputs: $factsText
-            - Expected Score Effect: ${trace.expectedScoreExplanation}
+            Action: ${action.title}
+            Rule idea: $cleanRuleWording
+            Calculated Facts:
+            $factsBlock
         """.trimIndent()
 
         return try {
             val raw = withTimeout(15_000L) {
                 chatModel.generateContent(prompt).text?.trim()
             }
-            if (!raw.isNullOrBlank()) raw else fallback
+            FinancialCalculator.validateAiReferenceExplanation(
+                rawAiText = raw,
+                facts = facts,
+                fallbackTemplate = fallbackTemplate
+            )
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "Plain-English action explanation fallback ($e)")
-            fallback
+            Log.w(TAG, "Traceable action explanation fallback ($e)")
+            FinancialCalculator.validateAiReferenceExplanation(
+                rawAiText = null,
+                facts = facts,
+                fallbackTemplate = fallbackTemplate
+            )
         }
+    }
+
+    suspend fun explainSnapshotTraceable(
+        title: String,
+        category: String,
+        ruleWording: String,
+        facts: List<CalculatedValueFact>,
+        profile: UserProfile
+    ): TraceableAiExplanation {
+        val fallbackTemplate = FinancialCalculator.buildActivityFallbackTemplate(
+            title = title,
+            ruleWording = ruleWording,
+            facts = facts
+        )
+        if (facts.isEmpty()) {
+            return FinancialCalculator.validateAiReferenceExplanation(null, facts, fallbackTemplate)
+        }
+
+        val factsBlock = facts.joinToString("\n") { fact ->
+            val unitSuffix = if (fact.unit.isNotBlank()) " (${fact.unit})" else ""
+            "- ${fact.id}: ${fact.label} = ${fact.valueFormatted}$unitSuffix | formula: ${fact.formulaPlainWords} | source: ${fact.source}"
+        }
+        val cleanWording = ruleWording.replace(Regex("\\d"), "").trim()
+        val prompt = """
+            You are GrowMint Coach. Write one or two concise, plain-English sentences explaining what this logged financial decision means for a ${profile.userSituation} (${profile.incomeType.label} income).
+
+            CRITICAL REFERENCE-ONLY RULES:
+            - You MUST refer to every figure ONLY by its placeholder ID inside double curly braces, such as {{V1}} or {{V2}}.
+            - NEVER write any digit, number, percentage, currency symbol, or count directly in your text.
+            - NEVER invent, round, or mention any number that is not in the Calculated Facts list below.
+            - End your response with: (Educational guidance only.)
+
+            Decision: $title ($category)
+            Rule wording: $cleanWording
+            Calculated Facts:
+            $factsBlock
+        """.trimIndent()
+
+        return try {
+            val raw = withTimeout(15_000L) {
+                chatModel.generateContent(prompt).text?.trim()
+            }
+            FinancialCalculator.validateAiReferenceExplanation(
+                rawAiText = raw,
+                facts = facts,
+                fallbackTemplate = fallbackTemplate
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Traceable snapshot explanation fallback ($e)")
+            FinancialCalculator.validateAiReferenceExplanation(
+                rawAiText = null,
+                facts = facts,
+                fallbackTemplate = fallbackTemplate
+            )
+        }
+    }
+
+    suspend fun explainActionPlainLanguage(
+        action: MonthlyActionItem,
+        profile: UserProfile
+    ): String {
+        return explainActionTraceable(action, profile).plainResolvedText
+    }
+
+    suspend fun explainSnapshotPlainLanguage(
+        title: String,
+        oneLineSummary: String,
+        ruleWording: String,
+        numbersSummary: String,
+        profile: UserProfile
+    ): String {
+        val facts = FinancialCalculator.buildFactsForActivityEntry(
+            title = title,
+            category = "Decision",
+            numbersSummary = numbersSummary,
+            ruleId = null,
+            snapshotInputs = emptyList(),
+            snapshotTotalScore = null
+        )
+        return explainSnapshotTraceable(
+            title = title,
+            category = "Decision",
+            ruleWording = ruleWording,
+            facts = facts,
+            profile = profile
+        ).plainResolvedText
     }
 }

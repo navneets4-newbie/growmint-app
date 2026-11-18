@@ -118,7 +118,7 @@ fun HowGrowMintDecidesScreen(
                                 )
                             }
                             Text(
-                                text = rule.id,
+                                text = "${rule.id} · ${rule.version}",
                                 style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -126,6 +126,11 @@ fun HowGrowMintDecidesScreen(
                         Text(
                             text = rule.title,
                             style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
+                        )
+                        Text(
+                            text = "Summary label: ${rule.shortName} (${rule.version})",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                            color = MintPrimary
                         )
                         Text(
                             text = rule.plainDescription,
